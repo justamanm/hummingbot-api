@@ -59,6 +59,7 @@ from .connectors import (
 
 # Controller models
 from .controllers import Controller, ControllerConfig, ControllerConfigResponse, ControllerResponse, ControllerType
+from .price_query_groups import PriceQueryGroupWrite
 
 # Docker models
 from .docker import DockerImage

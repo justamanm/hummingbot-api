@@ -17,6 +17,7 @@ services:
       - ./routers/bot_orchestration.py:/hummingbot-api/routers/bot_orchestration.py:ro
       - ./models/bot_orchestration.py:/hummingbot-api/models/bot_orchestration.py:ro
       - ./models/__init__.py:/hummingbot-api/models/__init__.py:ro
+      - ./models/price_query_groups.py:/hummingbot-api/models/price_query_groups.py:ro
       # 买入追踪图需要由 API 独立采样、写入并查询，不参与 Bot 的下单循环。
       - ./services/bots_orchestrator.py:/hummingbot-api/services/bots_orchestrator.py:ro
       - ./database/models.py:/hummingbot-api/database/models.py:ro
@@ -27,11 +28,13 @@ services:
       - ./database/repositories/bot_run_repository.py:/hummingbot-api/database/repositories/bot_run_repository.py:ro
       - ./database/repositories/strategy_trade_repository.py:/hummingbot-api/database/repositories/strategy_trade_repository.py:ro
       - ./database/repositories/wallet_approval_gas_estimate_repository.py:/hummingbot-api/database/repositories/wallet_approval_gas_estimate_repository.py:ro
+      - ./database/repositories/price_query_group_repository.py:/hummingbot-api/database/repositories/price_query_group_repository.py:ro
       # 为 Condor 提供逐钱包的代币余额，避免只显示正在运行 Bot 使用的钱包。
       - ./routers/accounts.py:/hummingbot-api/routers/accounts.py:ro
       # 所有机器人共享一份NVDA行情缓存，避免分别请求外部服务。
       - ./main.py:/hummingbot-api/main.py:ro
       - ./routers/internal_market_data.py:/hummingbot-api/routers/internal_market_data.py:ro
+      - ./routers/price_query_groups.py:/hummingbot-api/routers/price_query_groups.py:ro
       - ./services/nvda_price_service.py:/hummingbot-api/services/nvda_price_service.py:ro
       - ./services/microduck_quote_service.py:/hummingbot-api/services/microduck_quote_service.py:ro
       # Gateway 钱包估值：按网络实际存在的稳定币回退，避免不存在的 USDC 询价。

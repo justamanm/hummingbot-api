@@ -16,6 +16,18 @@ class AccountState(Base):
     token_states = relationship("TokenState", back_populates="account_state", cascade="all, delete-orphan")
 
 
+class PriceQueryGroup(Base):
+    """可复用的日常报价分组名称；不保存报价本身。"""
+
+    __tablename__ = "price_query_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(64), nullable=False)
+    normalized_name = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class TokenState(Base):
     __tablename__ = "token_states"
 

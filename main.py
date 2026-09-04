@@ -56,6 +56,7 @@ from routers import (  # noqa: E402
     internal_market_data,
     market_data,
     portfolio,
+    price_query_groups,
     scripts,
     storage,
     system,
@@ -455,6 +456,7 @@ app.include_router(gateway.router, dependencies=[Depends(auth_user)])
 app.include_router(accounts.router, dependencies=[Depends(auth_user)])
 app.include_router(connectors.router, dependencies=[Depends(auth_user)])
 app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
+app.include_router(price_query_groups.router, dependencies=[Depends(auth_user)])
 app.include_router(trading.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])

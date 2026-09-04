@@ -10,6 +10,7 @@ from .gateway_swap_repository import GatewaySwapRepository
 from .strategy_trade_repository import StrategyTradeRepository
 from .wallet_approval_gas_estimate_repository import WalletApprovalGasEstimateRepository
 from .order_repository import OrderRepository
+from .price_query_group_repository import PriceQueryGroupRepository
 from .trade_repository import TradeRepository
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "ExecutorRepository",
     "FundingRepository",
     "OrderRepository",
+    "PriceQueryGroupRepository",
     "TradeRepository",
     "GatewaySwapRepository",
     "GatewayCLMMRepository",
