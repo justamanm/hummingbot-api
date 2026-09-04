@@ -21,7 +21,8 @@ class BotRunRepository:
         account_name: str,
         config_name: Optional[str] = None,
         image_version: Optional[str] = None,
-        deployment_config: Optional[Dict[str, Any]] = None
+        deployment_config: Optional[Dict[str, Any]] = None,
+        display_name: Optional[str] = None,
     ) -> BotRun:
         """Create a new bot run record."""
         bot_run = BotRun(
@@ -32,6 +33,7 @@ class BotRunRepository:
             config_name=config_name,
             account_name=account_name,
             image_version=image_version,
+            display_name=display_name,
             deployment_config=json.dumps(deployment_config) if deployment_config else None,
             deployment_status="DEPLOYED",
             run_status="CREATED"
@@ -41,6 +43,39 @@ class BotRunRepository:
         await self.session.flush()
         await self.session.refresh(bot_run)
         return bot_run
+
+    async def update_bot_run_display_name(
+        self, bot_name: str, display_name: Optional[str]
+    ) -> Optional[BotRun]:
+        """Update only the user-facing alias of the most recent run."""
+        stmt = select(BotRun).where(BotRun.bot_name == bot_name).order_by(
+            desc(BotRun.deployed_at)
+        )
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+        if bot_run is None:
+            return None
+
+        bot_run.display_name = display_name
+        await self.session.flush()
+        await self.session.refresh(bot_run)
+        return bot_run
+
+    async def get_display_names(self, bot_names: List[str]) -> Dict[str, str]:
+        """按 Bot 原名称返回当前别名，账单展示时动态读取，避免复制一份会过期的名称。"""
+        names = [name for name in bot_names if name and name != "__wallet_authorization__"]
+        if not names:
+            return {}
+        stmt = select(BotRun).where(BotRun.bot_name.in_(names)).order_by(
+            BotRun.bot_name, desc(BotRun.deployed_at)
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        result: Dict[str, str] = {}
+        for row in rows:
+            display_name = (row.display_name or "").strip()
+            if display_name and row.bot_name not in result:
+                result[row.bot_name] = display_name
+        return result
 
 
     async def update_bot_run_stopped(

@@ -175,6 +175,8 @@ class BotRun(Base):
     # Bot identification
     bot_name = Column(String, nullable=False, index=True)
     instance_name = Column(String, nullable=False, index=True)
+    # 用户可修改的展示名称；真实 bot_name 始终用于容器和内部调用。
+    display_name = Column(String, nullable=True)
 
     # Deployment info
     deployed_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
@@ -451,6 +453,66 @@ class ControllerPerformanceSnapshot(Base):
     status = Column(String, nullable=False)  # running, error, stopped
     performance = Column(Text, nullable=True)  # JSON dict of performance metrics
     custom_info = Column(Text, nullable=True)  # JSON dict of custom info
+
+
+class BuyTrackingSnapshot(Base):
+    """High-frequency, read-only state of a Microduck buy-tracking cycle."""
+    __tablename__ = "buy_tracking_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
+    bot_name = Column(String, nullable=False, index=True)
+    controller_id = Column(String, nullable=False, index=True)
+    current_price_usd = Column(Numeric(precision=30, scale=18), nullable=False)
+    trough_price_usd = Column(Numeric(precision=30, scale=18), nullable=False)
+    expected_buy_price_usd = Column(Numeric(precision=30, scale=18), nullable=False)
+    buy_drawdown_percent = Column(Numeric(precision=18, scale=8), nullable=False)
+    current_rebound_percent = Column(Numeric(precision=18, scale=8), nullable=False)
+    maximum_rebound_percent = Column(Numeric(precision=18, scale=8), nullable=False)
+    expected_buy_drawdown_percent = Column(Numeric(precision=18, scale=8), nullable=False)
+
+
+class StrategyTradeRecord(Base):
+    """本系统发起的买卖与授权总账；授权可只归属钱包而不关联 Bot。"""
+    __tablename__ = "strategy_trade_records"
+    __table_args__ = (
+        UniqueConstraint("bot_name", "controller_id", "transaction_hash", name="uq_strategy_trade_record_tx"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    bot_name = Column(String, nullable=False, index=True)
+    controller_id = Column(String, nullable=False, index=True)
+    side = Column(String, nullable=False, index=True)  # BUY, SELL or APPROVE
+    record_type = Column(String, nullable=False, default="TRADE", index=True)  # TRADE or APPROVAL
+    status = Column(String, nullable=False, default="CONFIRMED", index=True)  # PENDING, CONFIRMED or FAILED
+    wallet_address = Column(String, nullable=True, index=True)
+    base_token = Column(String, nullable=False, default="MICRODUCK")
+    quote_token = Column(String, nullable=False, default="USDG")
+    amount_base = Column(Numeric(precision=30, scale=18), nullable=False)
+    unit_price_usd = Column(Numeric(precision=30, scale=18), nullable=False)
+    total_quote = Column(Numeric(precision=30, scale=18), nullable=False)
+    gas_fee_native = Column(Numeric(precision=30, scale=18), nullable=True)
+    gas_token = Column(String, nullable=False, default="ETH")
+    approval_amount = Column(Numeric(precision=30, scale=18), nullable=True)
+    transaction_hash = Column(String, nullable=False, index=True)
+
+
+class WalletApprovalGasEstimate(Base):
+    """每个钱包最近一次 USDG 授权 Gas 预估，供账单参考，不代表实际支出。"""
+    __tablename__ = "wallet_approval_gas_estimates"
+    __table_args__ = (
+        UniqueConstraint("wallet_address", name="uq_wallet_approval_gas_estimate_wallet"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    wallet_address = Column(String, nullable=False, index=True)
+    token = Column(String, nullable=False, default="USDG")
+    approval_amount = Column(Numeric(precision=30, scale=18), nullable=False)
+    action_count = Column(Integer, nullable=False)
+    fee_per_gas_gwei = Column(Numeric(precision=30, scale=18), nullable=True)
+    estimated_gas_eth = Column(Numeric(precision=30, scale=18), nullable=False)
 
 
 class ExecutorRecord(Base):

@@ -4,12 +4,18 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import docker
 
-from database import AsyncDatabaseManager, BotRunRepository, ControllerPerformanceRepository
+from database import (
+    AsyncDatabaseManager, BotRunRepository, BuyTrackingRepository,
+    ControllerPerformanceRepository, StrategyTradeRepository,
+)
+from database.repositories.wallet_approval_gas_estimate_repository import WalletApprovalGasEstimateRepository
 from services.docker_service import DockerService
+from services.gateway_client import GatewayClient
 from utils.bot_archiver import BotArchiver
 from utils.mqtt_manager import MQTTManager
 
@@ -42,6 +48,7 @@ class BotsOrchestrator:
         # Controller performance dump (similar to AccountsService.dump_account_state)
         self.performance_dump_interval = performance_dump_interval * 60  # Convert minutes to seconds
         self._performance_dump_task: Optional[asyncio.Task] = None
+        self._buy_tracking_snapshot_task: Optional[asyncio.Task] = None
         # Shared manager injected from main.py; tables are created once at startup,
         # so no per-service bootstrap is needed here.
         self.db_manager = db_manager
@@ -77,6 +84,7 @@ class BotsOrchestrator:
 
         # Start controller performance dump loop
         self._performance_dump_task = asyncio.create_task(self._performance_dump_loop())
+        self._buy_tracking_snapshot_task = asyncio.create_task(self._buy_tracking_snapshot_loop())
         logger.info(f"Controller performance dump started ({self.performance_dump_interval}s interval)")
 
     async def _start_async(self):
@@ -104,6 +112,14 @@ class BotsOrchestrator:
             except asyncio.CancelledError:
                 pass
         self._performance_dump_task = None
+
+        if self._buy_tracking_snapshot_task:
+            self._buy_tracking_snapshot_task.cancel()
+            try:
+                await self._buy_tracking_snapshot_task
+            except asyncio.CancelledError:
+                pass
+        self._buy_tracking_snapshot_task = None
 
         # Stop MQTT manager
         await self.mqtt_manager.stop()
@@ -187,6 +203,18 @@ class BotsOrchestrator:
             self.mqtt_manager.clear_bot_controller_reports(bot_name)
 
         return {"success": success}
+
+    async def restart_bot_container(self, bot_name: str, docker_manager: DockerService) -> Dict:
+        """Restart the existing Bot container without archiving or removing it."""
+        if bot_name not in self.active_bots:
+            return {"success": False, "message": f"Bot {bot_name} not found"}
+        # The next MQTT report belongs to a fresh process. Do not serve stale controller
+        # state during the short restart window, but keep the Bot registration intact.
+        self.mqtt_manager.clear_bot_data(bot_name)
+        result = docker_manager.restart_container(bot_name)
+        if result.get("success"):
+            logger.info("Restarted Bot container %s without archive or removal", bot_name)
+        return result
 
     async def import_strategy_for_bot(self, bot_name, strategy, **kwargs):
         """
@@ -385,6 +413,245 @@ class BotsOrchestrator:
             finally:
                 await asyncio.sleep(self.performance_dump_interval)
 
+    async def _buy_tracking_snapshot_loop(self):
+        """Persist Microduck buy tracking data without affecting Bot ticks."""
+        while True:
+            try:
+                await self.dump_buy_tracking_snapshots()
+            except Exception as e:
+                logger.warning(f"Error saving buy tracking snapshots: {e}")
+            finally:
+                await asyncio.sleep(4)
+
+    @staticmethod
+    def _buy_tracking_values(custom_info: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if custom_info.get("state") != "trailing_buy":
+            return None
+        fields = {
+            "current_price_usd": custom_info.get("buy_price_usd"),
+            "trough_price_usd": custom_info.get("trough_unit_buy_price_usd"),
+            "expected_buy_price_usd": custom_info.get("buy_rebound_trigger_usd"),
+            "buy_drawdown_percent": custom_info.get("buy_drawdown_percent"),
+            "current_rebound_percent": custom_info.get("buy_tracking_current_rebound_percent"),
+            "maximum_rebound_percent": custom_info.get("effective_buy_rebound_percent"),
+            "expected_buy_drawdown_percent": custom_info.get("buy_tracking_expected_buy_drawdown_percent"),
+        }
+        try:
+            if any(value is None for value in fields.values()):
+                return None
+            return {key: str(value) for key, value in fields.items()}
+        except (TypeError, ValueError):
+            return None
+
+    async def dump_buy_tracking_snapshots(self):
+        """Read latest controller reports and persist chart points plus confirmed trades."""
+        async with self.db_manager.get_session_context() as session:
+            tracking_repo = BuyTrackingRepository(session)
+            trade_repo = StrategyTradeRepository(session)
+            await tracking_repo.purge_expired()
+            for bot_name in list(self.active_bots):
+                if self.is_bot_stopping(bot_name):
+                    continue
+                reports = self.mqtt_manager.get_bot_controller_reports(bot_name)
+                for controller_id, report in reports.items():
+                    info = report.get("custom_info", {}) if isinstance(report, dict) else {}
+                    values = self._buy_tracking_values(info if isinstance(info, dict) else {})
+                    if values:
+                        await tracking_repo.save(bot_name, controller_id, values)
+                    await self._sync_confirmed_strategy_trades(
+                        trade_repo, bot_name, controller_id, info if isinstance(info, dict) else {},
+                    )
+
+    @staticmethod
+    async def _sync_confirmed_strategy_trades(
+        repo: StrategyTradeRepository, bot_name: str, controller_id: str, custom_info: dict[str, Any],
+    ) -> None:
+        """将已确认成交写入其管理钱包的唯一总账。"""
+        history = custom_info.get("trade_history")
+        if not isinstance(history, list):
+            return
+        wallet_address = str(custom_info.get("wallet_address") or "").strip() or None
+        for trade in history:
+            if not isinstance(trade, dict):
+                continue
+            try:
+                await repo.save_confirmed(bot_name, controller_id, trade, wallet_address=wallet_address)
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning("Skip malformed confirmed strategy trade for %s/%s: %s", bot_name, controller_id, exc)
+
+    async def get_buy_tracking_history(
+        self, bot_name: str, controller_id: Optional[str], start_time: datetime
+    ) -> list[dict]:
+        async with self.db_manager.get_session_context() as session:
+            return await BuyTrackingRepository(session).history(bot_name, controller_id, start_time)
+
+    async def get_strategy_trade_records(
+        self, bot_name: str, controller_id: Optional[str], limit: int,
+    ) -> list[dict]:
+        """Return persisted confirmed records, after one immediate MQTT sync for freshness."""
+        async with self.db_manager.get_session_context() as session:
+            repo = StrategyTradeRepository(session)
+            reports = self.mqtt_manager.get_bot_controller_reports(bot_name)
+            for report_controller_id, report in reports.items():
+                if controller_id and report_controller_id != controller_id:
+                    continue
+                info = report.get("custom_info", {}) if isinstance(report, dict) else {}
+                await self._sync_confirmed_strategy_trades(
+                    repo, bot_name, report_controller_id, info if isinstance(info, dict) else {},
+                )
+            # 授权不由 Bot 发起，不能等待 MQTT 状态；在用户查看总账时用 Gateway
+            # 的链上确认结果补齐真实 Gas。
+            gateway = GatewayClient(os.getenv("GATEWAY_URL", "http://gateway:15888"))
+            try:
+                for approval in await repo.pending_approvals(bot_name, controller_id):
+                    result = await gateway.poll_transaction("ethereum-robinhoodchain", approval.transaction_hash)
+                    tx_status = result.get("txStatus") if isinstance(result, dict) else None
+                    if tx_status == 1:
+                        await repo.resolve_approval(approval, "CONFIRMED", result.get("fee"))
+                    elif tx_status not in (None, 0):
+                        # 链上失败也可能已经支付 Gas，保留 Gateway 明确返回的数值。
+                        await repo.resolve_approval(approval, "FAILED", result.get("fee"))
+            except Exception as exc:
+                logger.warning("Unable to refresh pending USDG approvals for %s: %s", bot_name, exc)
+            finally:
+                await gateway.close()
+            return await repo.list(bot_name, controller_id, limit)
+
+    async def get_wallet_strategy_ledger(
+        self,
+        wallet_address: str,
+        limit: int,
+        bot_name: Optional[str] = None,
+        controller_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """按钱包读取唯一总账；Bot 账单仅是其中按 Bot/控制器筛选的引用视图。"""
+        normalized_wallet = wallet_address.strip().lower()
+        async with self.db_manager.get_session_context() as session:
+            repo = StrategyTradeRepository(session)
+            # Refresh active Bot records first. Archived/removed Bot records are already durable in the database.
+            for active_bot_name in list(self.active_bots):
+                reports = self.mqtt_manager.get_bot_controller_reports(active_bot_name)
+                for active_controller_id, report in reports.items():
+                    info = report.get("custom_info", {}) if isinstance(report, dict) else {}
+                    await self._sync_confirmed_strategy_trades(
+                        repo, active_bot_name, active_controller_id, info if isinstance(info, dict) else {},
+                    )
+
+            gateway = GatewayClient(os.getenv("GATEWAY_URL", "http://gateway:15888"))
+            try:
+                for approval in await repo.pending_approvals_for_wallet(normalized_wallet):
+                    result = await gateway.poll_transaction("ethereum-robinhoodchain", approval.transaction_hash)
+                    tx_status = result.get("txStatus") if isinstance(result, dict) else None
+                    if tx_status == 1:
+                        await repo.resolve_approval(approval, "CONFIRMED", result.get("fee"))
+                    elif tx_status not in (None, 0):
+                        await repo.resolve_approval(approval, "FAILED", result.get("fee"))
+
+                # 历史版本的 Bot 与 Gateway poll 都可能只写入 0/空 Gas。对这类
+                # 已确认记录按交易哈希读取一次链上回执，随后保存实际值。
+                for record in await repo.confirmed_records_missing_gas(normalized_wallet):
+                    actual_gas = await gateway.get_confirmed_transaction_gas(
+                        "ethereum-robinhoodchain", record.transaction_hash,
+                    )
+                    if actual_gas is not None:
+                        await repo.save_actual_gas(record, actual_gas)
+            except Exception as exc:
+                logger.warning("Unable to refresh pending wallet approvals for %s: %s", normalized_wallet, exc)
+            finally:
+                await gateway.close()
+
+            records = await repo.list_by_wallet(
+                normalized_wallet,
+                limit,
+                bot_name=bot_name,
+                controller_id=controller_id,
+            )
+            # 别名并非交易事实，不能存进交易记录。这里按当前 Bot 设置即时补上，
+            # 因此用户改名后，钱包账单和 Bot 账单都会立刻显示新别名。
+            bot_display_names = await BotRunRepository(session).get_display_names(
+                list({str(record.get("bot_name") or "") for record in records})
+            )
+            for record in records:
+                display_name = bot_display_names.get(str(record.get("bot_name") or ""))
+                if display_name:
+                    record["bot_display_name"] = display_name
+            latest_approval_gas_estimate = await WalletApprovalGasEstimateRepository(session).get(normalized_wallet)
+
+        microduck_net = Decimal("0")
+        usdg_net = Decimal("0")
+        eth_gas = Decimal("0")
+        unknown_gas_count = 0
+        confirmed_count = 0
+        for record in records:
+            if record["status"] != "CONFIRMED":
+                continue
+            confirmed_count += 1
+            if record["record_type"] == "TRADE":
+                amount = Decimal(str(record["amount_base"]))
+                quote = Decimal(str(record["total_quote"]))
+                if record["side"] == "BUY":
+                    microduck_net += amount
+                    usdg_net -= quote
+                elif record["side"] == "SELL":
+                    microduck_net -= amount
+                    usdg_net += quote
+            if record["gas_fee_native"] is None:
+                unknown_gas_count += 1
+            else:
+                eth_gas += Decimal(str(record["gas_fee_native"]))
+
+        return {
+            "wallet_address": normalized_wallet,
+            "filter": {
+                "bot_name": bot_name,
+                "controller_id": controller_id,
+            },
+            "summary": {
+                "microduck_net": float(microduck_net),
+                "usdg_net": float(usdg_net),
+                "eth_gas": float(eth_gas),
+                "unknown_gas_count": unknown_gas_count,
+                "confirmed_count": confirmed_count,
+            },
+            "records": records,
+            "latest_approval_gas_estimate": latest_approval_gas_estimate,
+        }
+
+    async def save_wallet_approval_gas_estimate(
+        self,
+        wallet_address: str,
+        token: str,
+        approval_amount: Any,
+        action_count: int,
+        fee_per_gas_gwei: Any,
+        estimated_gas_eth: Any,
+    ) -> None:
+        async with self.db_manager.get_session_context() as session:
+            await WalletApprovalGasEstimateRepository(session).save(
+                wallet_address=wallet_address,
+                token=token,
+                approval_amount=approval_amount,
+                action_count=action_count,
+                fee_per_gas_gwei=fee_per_gas_gwei,
+                estimated_gas_eth=estimated_gas_eth,
+            )
+
+    async def save_wallet_approval(
+        self,
+        bot_name: str,
+        controller_id: str,
+        wallet_address: str,
+        amount: str,
+        transaction_hash: str,
+        status: str = "PENDING",
+        gas_fee_native: Any = None,
+    ) -> None:
+        """保存授权总账；钱包栏授权可使用内部的非 Bot 归属键。"""
+        async with self.db_manager.get_session_context() as session:
+            await StrategyTradeRepository(session).save_pending_approval(
+                bot_name, controller_id, wallet_address, amount, transaction_hash, status, gas_fee_native,
+            )
+
     async def dump_controller_performance(self):
         """Save current controller performance for all active bots to the database."""
         snapshot_timestamp = datetime.now(timezone.utc)
@@ -567,6 +834,15 @@ class BotsOrchestrator:
             logger.error(f"Failed to create bot run record: {e}")
             # Don't fail the deployment if bot run creation fails
 
+    async def update_bot_display_name(
+        self, bot_name: str, display_name: Optional[str]
+    ) -> Optional[Dict]:
+        """Persist a user-facing alias without changing the real bot name."""
+        async with self.db_manager.get_session_context() as session:
+            bot_run_repo = BotRunRepository(session)
+            bot_run = await bot_run_repo.update_bot_run_display_name(bot_name, display_name)
+            return self._serialize_bot_run(bot_run) if bot_run else None
+
     @staticmethod
     def _serialize_bot_run(run, include_final_status: bool = True) -> Dict:
         """Serialize a BotRun ORM object into a JSON-friendly dictionary.
@@ -578,6 +854,7 @@ class BotsOrchestrator:
             "id": run.id,
             "bot_name": run.bot_name,
             "instance_name": run.instance_name,
+            "display_name": run.display_name,
             "deployed_at": run.deployed_at.isoformat() if run.deployed_at else None,
             "stopped_at": run.stopped_at.isoformat() if run.stopped_at else None,
             "strategy_type": run.strategy_type,

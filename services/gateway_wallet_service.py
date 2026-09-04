@@ -1,7 +1,8 @@
 import asyncio
 import logging
+import time
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
@@ -10,6 +11,11 @@ from services.gecko_price_source import GeckoPriceSource
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
+
+_STABLE_QUOTE_CANDIDATES = ("USDC", "USDT", "USDG")
+_TOKEN_LIST_TTL = 3600.0
+_LAST_PRICE_TTL = 3600.0
+_DISPLAY_PRICE_TTL = 60.0
 
 
 def balance_entry(token: str, units: Decimal, price: Optional[Decimal],
@@ -52,6 +58,8 @@ class GatewayWalletService:
         self._market_data_service = market_data_service
         # Batched DEX price lookups via GeckoTerminal, tried before per-token Gateway quotes.
         self._gecko_source = GeckoPriceSource(gateway_client)
+        self._network_quote_cache: Dict[Tuple[str, str], Tuple[float, Optional[str]]] = {}
+        self._last_prices: Dict[Tuple[str, str, str], Tuple[float, Decimal]] = {}
 
     async def close(self) -> None:
         """Release resources held by this service (the GeckoTerminal HTTP client)."""
@@ -244,7 +252,7 @@ class GatewayWalletService:
             tokens: List of token symbols to get prices for
 
         Returns:
-            Dictionary mapping token symbol to price in USDC
+            Dictionary mapping token symbol to its USD-equivalent price
         """
         from hummingbot.core.data_type.common import TradeType
         from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
@@ -288,10 +296,35 @@ class GatewayWalletService:
             gecko_prices = await self._gecko_source.fetch_prices(chain, network, tokens)
             for token, price in gecko_prices.items():
                 prices[token] = price
+                self._remember_price(chain, network, token, price)
                 publish_price(f"{token}-{quote_asset}", price)
                 logger.debug(f"Fetched GeckoTerminal price for {token}: {price} {quote_asset}")
         except Exception as e:
             logger.warning(f"GeckoTerminal pricing failed for {full_network}: {e}")
+
+        missing_tokens = [token for token in tokens if token not in prices]
+        if missing_tokens:
+            quote_asset = await self._select_gateway_quote_asset(chain, network)
+
+        # Some networks have no USD stablecoin in Gateway's token list. Sending
+        # TOKEN/USDC quotes there can only fail with "Token not found: USDC".
+        # Use a recent good USD price when available and otherwise leave the
+        # price unknown; a zero portfolio value is preferable to noisy,
+        # impossible swap requests every refresh cycle.
+        if missing_tokens and quote_asset is None:
+            for token in missing_tokens:
+                cached = self._recent_price(chain, network, token)
+                if cached is not None:
+                    prices[token] = cached
+                    publish_price(f"{token}-USDC", cached)
+            logger.debug(
+                "Skipping Gateway price fallback for %s: no USDC/USDT token on %s",
+                ", ".join(missing_tokens), full_network,
+            )
+            if eth_needs_weth_price and "WETH" in prices:
+                prices["ETH"] = prices["WETH"]
+                publish_price("ETH-USDC", prices["WETH"])
+            return prices
 
         for token in tokens:
             token_upper = token.upper()
@@ -331,10 +364,11 @@ class GatewayWalletService:
                     elif result and "price" in result:
                         price = Decimal(str(result["price"]))
                         prices[token] = price
+                        self._remember_price(chain, network, token, price)
                         # Also publish to the shared pool so future lookups can find it
-                        trading_pair = f"{token}-USDC"
+                        trading_pair = f"{token}-{quote_asset}"
                         publish_price(trading_pair, price)
-                        logger.debug(f"Fetched immediate price for {token}: {price} USDC")
+                        logger.debug(f"Fetched immediate price for {token}: {price} {quote_asset}")
             except Exception as e:
                 logger.error(f"Error fetching gateway prices: {e}", exc_info=True)
 
@@ -345,3 +379,56 @@ class GatewayWalletService:
             logger.debug(f"Copied WETH price to ETH: {prices['WETH']} USDC")
 
         return prices
+
+    async def get_gateway_prices(self, chain: str, network: str,
+                                 tokens: List[str]) -> Dict[str, Decimal]:
+        """Return USD prices with a short cache suitable for live balance displays."""
+        now = time.time()
+        prices: Dict[str, Decimal] = {}
+        missing: List[str] = []
+        for token in tokens:
+            lookup = "WETH" if chain == "ethereum" and token.upper() == "ETH" else token.upper()
+            cached = self._last_prices.get((chain, network, lookup))
+            if cached is not None and now - cached[0] <= _DISPLAY_PRICE_TTL:
+                prices[token] = cached[1]
+            else:
+                missing.append(token)
+        if missing:
+            fetched = await self._fetch_gateway_prices_immediate(chain, network, missing)
+            prices.update(fetched)
+        return prices
+
+    async def _select_gateway_quote_asset(self, chain: str, network: str) -> Optional[str]:
+        """Return a USD stablecoin that actually exists on this Gateway network."""
+        key = (chain, network)
+        now = time.time()
+        cached = self._network_quote_cache.get(key)
+        if cached is not None and now - cached[0] < _TOKEN_LIST_TTL:
+            return cached[1]
+
+        try:
+            response = check_gateway_error(await self.gateway_client.get_tokens(chain, network))
+            listed = {
+                str(token.get("symbol", "")).upper()
+                for token in response.get("tokens", [])
+                if isinstance(token, dict)
+            }
+            quote = next((symbol for symbol in _STABLE_QUOTE_CANDIDATES if symbol in listed), None)
+            self._network_quote_cache[key] = (now, quote)
+            return quote
+        except Exception as exc:
+            # An unavailable token-list endpoint does not prove that the quote
+            # token is absent. Keep the old behaviour for this cycle and do not
+            # cache the uncertainty.
+            logger.debug("Could not inspect token list for %s-%s: %s", chain, network, exc)
+            return "USDC"
+
+    def _remember_price(self, chain: str, network: str, token: str, price: Decimal) -> None:
+        if price > 0:
+            self._last_prices[(chain, network, token.upper())] = (time.time(), price)
+
+    def _recent_price(self, chain: str, network: str, token: str) -> Optional[Decimal]:
+        cached = self._last_prices.get((chain, network, token.upper()))
+        if cached is None or time.time() - cached[0] > _LAST_PRICE_TTL:
+            return None
+        return cached[1]

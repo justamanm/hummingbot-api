@@ -4,8 +4,10 @@ import shutil
 import threading
 import time
 from typing import Dict
+from urllib.parse import urlparse
 
 import docker
+import yaml
 from docker.errors import DockerException
 from docker.types import LogConfig
 
@@ -13,6 +15,7 @@ from config import settings
 from models import V2ControllerDeployment
 from utils.file_system import fs_util
 from utils.gateway_certs import ensure_gateway_certs, gateway_certs_dir
+from utils.controller_state import restore_controller_states
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -139,6 +142,18 @@ class DockerService:
         except DockerException as e:
             return str(e)
 
+    def restart_container(self, container_name):
+        """Restart an existing container without removing its mounted Bot state."""
+        try:
+            container = self.client.containers.get(container_name)
+            container.restart()
+            return {
+                "success": True,
+                "message": f"Container {container_name} restarted successfully.",
+            }
+        except DockerException as e:
+            return {"success": False, "message": str(e)}
+
     def get_container_status(self, container_name):
         """Get the status of a container"""
         try:
@@ -173,6 +188,54 @@ class DockerService:
         if os.path.commonpath([resolved_base, resolved_path]) != resolved_base:
             raise ValueError(f"Invalid {label}: '{path}' resolves outside of '{base_dir}'.")
         return resolved_path
+
+    @staticmethod
+    def _ensure_controller_config_id(config_path: str, controller_file: str) -> None:
+        """只在机器人实例副本缺少 id 时补入文件名，不改动源配置。"""
+        with open(config_path, "r", encoding="utf-8") as file:
+            content = file.read()
+
+        parsed = yaml.safe_load(content)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Controller config {controller_file} must be a YAML mapping")
+        if "id" in parsed:
+            return
+
+        config_id = os.path.splitext(controller_file)[0]
+        with open(config_path, "w", encoding="utf-8") as file:
+            file.write(f"id: {config_id}\n{content}")
+
+    @staticmethod
+    def _apply_controller_overrides(
+        config_path: str,
+        config_id: str,
+        overrides: dict,
+    ) -> None:
+        """校验并写入机器人实例副本；调用方不得传入公共模板路径。"""
+        if not overrides:
+            return
+        with open(config_path, "r", encoding="utf-8") as file:
+            instance_config = yaml.safe_load(file) or {}
+        instance_config.update(overrides)
+        instance_config["id"] = config_id
+        config_class = fs_util.load_controller_config_class(
+            str(instance_config.get("controller_type") or ""),
+            str(instance_config.get("controller_name") or ""),
+        )
+        if config_class is None:
+            raise ValueError(f"Cannot validate instance config: {config_id}")
+        validated = config_class(**instance_config).model_dump(mode="json")
+        temporary_path = f"{config_path}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            yaml.safe_dump(validated, file, allow_unicode=True, sort_keys=False)
+        os.replace(temporary_path, config_path)
+
+    @staticmethod
+    def _restore_controller_states(instance_dir: str, controller_files: list[str]) -> list[str]:
+        """把每个控制器最近一次归档状态复制到新实例，避免重新部署后丢失持仓。"""
+        # 创建新实例只接收明确导入的持仓，不继承同名模板的旧 Bot 历史。
+        # 原实例重启保留自己的 data 目录，不经过跨实例归档恢复。
+        return restore_controller_states(instance_dir, controller_files, restore_archived=False)
 
     def create_hummingbot_instance(self, config: V2ControllerDeployment):
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
@@ -233,14 +296,29 @@ class DockerService:
 
                             if os.path.exists(source_controller_file):
                                 shutil.copy2(source_controller_file, destination_controller_file)
+                                self._ensure_controller_config_id(
+                                    destination_controller_file, controller_file
+                                )
+                                config_id = os.path.splitext(controller_file)[0]
+                                overrides = config.controller_overrides.get(config_id, {})
+                                self._apply_controller_overrides(
+                                    destination_controller_file,
+                                    config_id,
+                                    overrides,
+                                )
+                                if overrides:
+                                    logger.info("Applied per-instance overrides: %s", config_id)
                                 logger.info(f"Copied controller config: {controller_file}")
                             else:
                                 logger.warning(
                                     f"Controller config file {controller_file} not found in {controllers_config_dir}"
                                 )
 
+                        self._restore_controller_states(instance_dir, controllers_list)
+
                 except Exception as e:
-                    logger.error(f"Error reading script config file {config.script_config}: {e}")
+                    logger.error(f"Error preparing script config {config.script_config}: {e}")
+                    raise
             else:
                 logger.warning(f"Script config file {config.script_config} not found in {script_config_dir}")
         # Path relative to fs_util base_path (which is "bots")
@@ -248,19 +326,18 @@ class DockerService:
         client_config = fs_util.read_yaml_file(conf_file_path)
         client_config['instance_id'] = instance_name
 
-        # SEC-048: point the instance at the secured (mTLS) Gateway and give it the shared
-        # cert set. Cert keys are decrypted inside the container with CONFIG_PASSWORD, so this
-        # is only enabled when a config password is set. Generation is idempotent: the instance
-        # reuses (or seeds) the same CA the Gateway uses.
+        # 新实例必须遵循全局 GATEWAY_URL 的协议。配置密码负责解密配置，
+        # 并不代表 Gateway 一定启用了 HTTPS。
         gateway_certs_host_dir = None
-        if settings.security.config_password:
+        gateway_use_ssl = urlparse(settings.gateway.url).scheme.lower() == 'https'
+        gateway_section = client_config.get('gateway') or {}
+        gateway_section['gateway_use_ssl'] = gateway_use_ssl
+        client_config['gateway'] = gateway_section
+        if settings.security.config_password and gateway_use_ssl:
             # Generate/locate the shared cert set (written to the local-base dir) and resolve the
             # matching HOST path for the bind-mount source.
             ensure_gateway_certs(settings.security.config_password)
             gateway_certs_host_dir = gateway_certs_dir(host=True)
-            gateway_section = client_config.get('gateway') or {}
-            gateway_section['gateway_use_ssl'] = True
-            client_config['gateway'] = gateway_section
 
         fs_util.dump_dict_to_yaml(conf_file_path, client_config)
 

@@ -94,6 +94,28 @@ class AsyncDatabaseManager:
                 "gateway_amm_positions", "position_rent_refunded",
                 "ALTER TABLE gateway_amm_positions ADD COLUMN position_rent_refunded NUMERIC(30,18)"
             ),
+            # 用户给 Bot 设置的展示别名，不影响容器名或内部调用。
+            (
+                "bot_runs", "display_name",
+                "ALTER TABLE bot_runs ADD COLUMN display_name TEXT"
+            ),
+            # 统一策略总账：买卖与 USDG 授权都按交易哈希保存，Gas 始终独立于成交金额。
+            (
+                "strategy_trade_records", "record_type",
+                "ALTER TABLE strategy_trade_records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'TRADE'"
+            ),
+            (
+                "strategy_trade_records", "status",
+                "ALTER TABLE strategy_trade_records ADD COLUMN status TEXT NOT NULL DEFAULT 'CONFIRMED'"
+            ),
+            (
+                "strategy_trade_records", "wallet_address",
+                "ALTER TABLE strategy_trade_records ADD COLUMN wallet_address TEXT"
+            ),
+            (
+                "strategy_trade_records", "approval_amount",
+                "ALTER TABLE strategy_trade_records ADD COLUMN approval_amount NUMERIC(30,18)"
+            ),
         ]
         for table, column, sql in migrations:
             try:

@@ -53,6 +53,7 @@ from routers import (  # noqa: E402
     gateway_amm,
     gateway_clmm,
     gateway_swap,
+    internal_market_data,
     market_data,
     portfolio,
     scripts,
@@ -447,6 +448,8 @@ def auth_user(
 
 
 # Include all routers with authentication
+# 仅在本机Docker网络和127.0.0.1上提供公开行情，不包含账户或密钥数据。
+app.include_router(internal_market_data.router)
 app.include_router(docker.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway.router, dependencies=[Depends(auth_user)])
 app.include_router(accounts.router, dependencies=[Depends(auth_user)])

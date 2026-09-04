@@ -56,6 +56,9 @@ GATEWAY_TO_GECKO_NETWORK: Dict[str, str] = {
     "linea": "linea",
     "zksync": "zksync",
     "celo": "celo",
+    # Robinhood Chain is exposed as `ethereum-robinhoodchain` by Gateway and
+    # as `robinhood` by GeckoTerminal.
+    "robinhoodchain": "robinhood",
 }
 
 

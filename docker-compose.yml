@@ -4,9 +4,42 @@ services:
     image: hummingbot/hummingbot-api:latest
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:24872:8000"
     volumes:
       - ./bots:/hummingbot-api/bots
+      # 本地修复：新机器人按 GATEWAY_URL 选择 HTTP/HTTPS，避免配置密码误触发 HTTPS。
+      - ./services/docker_service.py:/hummingbot-api/services/docker_service.py:ro
+      # 重新部署同一控制器时，从最近归档实例恢复持仓与交易状态。
+      - ./utils/controller_state.py:/hummingbot-api/utils/controller_state.py:ro
+      # 原样保存控制器 YAML，保留用户写入的注释、空行和字段顺序。
+      - ./routers/controllers.py:/hummingbot-api/routers/controllers.py:ro
+      # 部署时接收模板覆盖值，并只写入本次 Bot 的独立配置。
+      - ./routers/bot_orchestration.py:/hummingbot-api/routers/bot_orchestration.py:ro
+      - ./models/bot_orchestration.py:/hummingbot-api/models/bot_orchestration.py:ro
+      - ./models/__init__.py:/hummingbot-api/models/__init__.py:ro
+      # 买入追踪图需要由 API 独立采样、写入并查询，不参与 Bot 的下单循环。
+      - ./services/bots_orchestrator.py:/hummingbot-api/services/bots_orchestrator.py:ro
+      - ./database/models.py:/hummingbot-api/database/models.py:ro
+      - ./database/connection.py:/hummingbot-api/database/connection.py:ro
+      - ./database/__init__.py:/hummingbot-api/database/__init__.py:ro
+      - ./database/repositories/__init__.py:/hummingbot-api/database/repositories/__init__.py:ro
+      - ./database/repositories/buy_tracking_repository.py:/hummingbot-api/database/repositories/buy_tracking_repository.py:ro
+      - ./database/repositories/bot_run_repository.py:/hummingbot-api/database/repositories/bot_run_repository.py:ro
+      - ./database/repositories/strategy_trade_repository.py:/hummingbot-api/database/repositories/strategy_trade_repository.py:ro
+      - ./database/repositories/wallet_approval_gas_estimate_repository.py:/hummingbot-api/database/repositories/wallet_approval_gas_estimate_repository.py:ro
+      # 为 Condor 提供逐钱包的代币余额，避免只显示正在运行 Bot 使用的钱包。
+      - ./routers/accounts.py:/hummingbot-api/routers/accounts.py:ro
+      # 所有机器人共享一份NVDA行情缓存，避免分别请求外部服务。
+      - ./main.py:/hummingbot-api/main.py:ro
+      - ./routers/internal_market_data.py:/hummingbot-api/routers/internal_market_data.py:ro
+      - ./services/nvda_price_service.py:/hummingbot-api/services/nvda_price_service.py:ro
+      - ./services/microduck_quote_service.py:/hummingbot-api/services/microduck_quote_service.py:ro
+      # Gateway 钱包估值：按网络实际存在的稳定币回退，避免不存在的 USDC 询价。
+      - ./services/gateway_wallet_service.py:/hummingbot-api/services/gateway_wallet_service.py:ro
+      # 兼容当前与旧版 Gateway 的代币列表、报价和交易接口。
+      - ./services/gateway_client.py:/hummingbot-api/services/gateway_client.py:ro
+      # 为 Robinhood Chain 批量读取 GeckoTerminal 美元价格。
+      - ./services/gecko_price_source.py:/hummingbot-api/services/gecko_price_source.py:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # Host metrics: mount the host's /proc read-only so the /system/resources
       # route reports HOST CPU/RAM/load instead of the container's.
@@ -26,11 +59,17 @@ services:
       # Override specific values for Docker networking
       - BROKER_HOST=emqx
       - DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@postgres:5432/hummingbot_api
+      - USERNAME=microduck
+      - PASSWORD=${GATEWAY_PASSPHRASE:?请先设置 API 密码}
+      - CONFIG_PASSWORD=${GATEWAY_PASSPHRASE:?请先设置配置密码}
       # SEC-048: reach the secured Gateway container-to-container over the shared emqx-bridge
       # network (the Gateway container is attached to it on start). https + the 'gateway' cert SAN.
       # Note: the Gateway's host publish is bound to 127.0.0.1, so host.docker.internal can no
       # longer reach it — the in-network container name is the correct (and more secure) path.
-      - GATEWAY_URL=https://gateway:15888
+      - GATEWAY_URL=http://gateway:15888
+      - GATEWAY_PASSPHRASE=${GATEWAY_PASSPHRASE:?请先设置 Gateway 密码}
+      # Docker API 看到的是 Mac 主机路径，不能使用容器内的 /hummingbot-api 路径。
+      - BOTS_PATH=/Users/justaman/Documents/code/finance/microduck/condor-stack/hummingbot-api
       # Point psutil at the mounted host paths (see volumes above)
       - HOST_PROC=/host/proc
       - HOST_DISK_PATH=/host/disk-probe
@@ -41,12 +80,16 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - emqx-bridge
+      - microduck-gateway
     depends_on:
       - postgres
   emqx:
     container_name: hummingbot-broker
     image: emqx:5
     restart: unless-stopped
+    ports:
+      # 部署出的 Hummingbot 使用主机网络，只允许它从本机连接 MQTT。
+      - "127.0.0.1:1883:1883"
     environment:
       - EMQX_NAME=emqx
       - EMQX_HOST=node1.emqx.local
@@ -57,14 +100,6 @@ services:
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
       - emqx-etc:/opt/emqx/etc
-    ports:
-      - "1883:1883"  # mqtt:tcp
-      - "8883:8883"  # mqtt:tcp:ssl
-      - "8083:8083"  # mqtt:ws
-      - "8084:8084"  # mqtt:ws:ssl
-      - "8081:8081"  # http:management
-      - "18083:18083"  # http:dashboard
-      - "61613:61613"  # web-stomp gateway
     networks:
       emqx-bridge:
         aliases:
@@ -89,8 +124,6 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # Init script as safety net - only runs on first initialization
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
-    ports:
-      - "5432:5432"
     networks:
       - emqx-bridge
     healthcheck:
@@ -102,6 +135,9 @@ services:
 networks:
   emqx-bridge:
     driver: bridge
+  microduck-gateway:
+    external: true
+    name: microduck_default
 
 volumes:
   emqx-data: { }

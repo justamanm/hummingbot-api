@@ -30,6 +30,7 @@ from .backtesting import BacktestingConfig
 # Bot orchestration models (bot lifecycle management)
 from .bot_orchestration import (
     AllBotsStatusResponse,
+    BotDisplayNameUpdate,
     BotAction,
     BotHistoryRequest,
     BotHistoryResponse,
@@ -215,6 +216,7 @@ __all__ = [
     "BotHistoryResponse",
     "MQTTStatus",
     "AllBotsStatusResponse",
+    "BotDisplayNameUpdate",
     "StopAndArchiveRequest",
     "StopAndArchiveResponse",
     "V2ControllerDeployment",

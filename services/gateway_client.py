@@ -183,6 +183,9 @@ class GatewayClient:
         self._connector_trading_types: Optional[Dict[str, List[str]]] = None
         # Per-(chain, network) token address -> symbol map, fetched on first use.
         self._token_symbols: Dict[tuple[str, str], Dict[str, str]] = {}
+        # Gateway has shipped two swap route layouts. Detect once, then keep using the
+        # working layout so quote polling does not create a 404 on every cycle.
+        self._swap_route_style: Optional[str] = None
 
     @staticmethod
     def parse_network_id(network_id: str) -> tuple[str, str]:
@@ -398,6 +401,49 @@ class GatewayClient:
             "tokens": tokens if tokens is not None else []
         })
 
+    async def get_allowances(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        spender: str,
+        tokens: Optional[List[str]] = None,
+    ) -> Dict:
+        """Get a wallet's read-only token allowances for one Gateway spender."""
+        return await self._request("POST", f"chains/{chain}/allowances", json={
+            "network": network,
+            "address": address,
+            "spender": spender,
+            "tokens": tokens if tokens is not None else [],
+        })
+
+    async def approve_token(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        spender: str,
+        token: str,
+        amount: str,
+    ) -> Dict:
+        """Submit one explicit token-approval transaction through Gateway.
+
+        The caller must provide a finite positive amount.  Omitting ``amount``
+        would make Gateway request an unlimited approval, which this UI never
+        does automatically.
+        """
+        return await self._request("POST", f"chains/{chain}/approve", json={
+            "network": network,
+            "address": address,
+            "spender": spender,
+            "token": token,
+            "amount": amount,
+        })
+
+    async def estimate_gas(self, chain: str, network: str) -> Dict:
+        """Read the current network gas price. This does not submit a transaction."""
+        return await self._request("GET", f"chains/{chain}/estimate-gas", params={"network": network})
+
     async def get_chains(self) -> Dict:
         """Get available chains"""
         return await self._request("GET", "config/chains")
@@ -415,10 +461,31 @@ class GatewayClient:
             return None
 
     async def get_tokens(self, chain: str, network: str) -> Dict:
-        """Get available tokens for a chain/network"""
+        """Get available tokens across current and older Gateway request formats."""
+        result = await self._request("GET", "tokens", params={
+            "chain": chain,
+            "network": network,
+        })
+        if not self._is_route_or_schema_mismatch(result):
+            return result
         return await self._request("GET", "tokens", params={
             "chainNetwork": f"{chain}-{network}"
         })
+
+    @staticmethod
+    def _is_route_or_schema_mismatch(result: Optional[Dict]) -> bool:
+        """Whether another supported Gateway API layout should be attempted."""
+        if not isinstance(result, dict) or "error" not in result:
+            return False
+        status = int(result.get("status", 0))
+        message = str(result.get("error", "")).lower()
+        return status in (400, 404, 405, 422) and (
+            "route " in message
+            or "not found" in message
+            or "must have required property" in message
+            or "querystring" in message
+            or "validation" in message
+        )
 
     async def _get_token_symbols(self, chain: str, network: str) -> Dict[str, str]:
         """Gateway's token address -> symbol map for a network, fetched once per client."""
@@ -688,7 +755,22 @@ class GatewayClient:
             for key, value in extra_params.items():
                 params[key] = str(value).lower() if isinstance(value, bool) else str(value)
 
-        return await self._request("GET", f"trading/{trading_type}/quote-swap", params=params)
+        unified_params = {
+            key: value for key, value in params.items()
+            if key in {"chainNetwork", "baseToken", "quoteToken", "amount", "side", "slippagePct"}
+        }
+        unified_params["connector"] = f"{name}/{trading_type}"
+
+        if self._swap_route_style == "typed":
+            return await self._request("GET", f"trading/{trading_type}/quote-swap", params=params)
+
+        result = await self._request("GET", "trading/swap/quote", params=unified_params)
+        if self._is_route_or_schema_mismatch(result):
+            self._swap_route_style = "typed"
+            logger.info("Gateway uses the typed /trading/{type} route layout")
+            return await self._request("GET", f"trading/{trading_type}/quote-swap", params=params)
+        self._swap_route_style = "unified"
+        return result
 
     async def execute_quote(
         self,
@@ -767,7 +849,25 @@ class GatewayClient:
             # Connector-specific params, merged after the model — see quote_swap.
             payload.update(extra_params)
 
-        return await self._request("POST", f"trading/{trading_type}/execute-swap", json=payload)
+        unified_payload = {
+            key: value for key, value in payload.items()
+            if key in {
+                "chainNetwork", "walletAddress", "baseToken", "quoteToken",
+                "amount", "side", "slippagePct",
+            }
+        }
+        unified_payload["connector"] = f"{name}/{trading_type}"
+
+        if self._swap_route_style == "typed":
+            return await self._request("POST", f"trading/{trading_type}/execute-swap", json=payload)
+
+        result = await self._request("POST", "trading/swap/execute", json=unified_payload)
+        if self._is_route_or_schema_mismatch(result):
+            self._swap_route_style = "typed"
+            logger.info("Gateway uses the typed /trading/{type} route layout")
+            return await self._request("POST", f"trading/{trading_type}/execute-swap", json=payload)
+        self._swap_route_style = "unified"
+        return result
 
     # ============================================
     # Liquidity Operations - CLMM (unified /trading/clmm endpoints)
@@ -1286,4 +1386,43 @@ class GatewayClient:
             return await self._request("POST", f"chains/{chain}/poll", json=payload)
         except Exception as e:
             logger.error(f"Error polling transaction {tx_hash}: {e}")
+            return None
+
+    async def get_confirmed_transaction_gas(self, network_id: str, tx_hash: str) -> Optional[Decimal]:
+        """从已确认的 EVM 交易回执读取实际 Gas 费用。
+
+        Gateway 的 poll 接口负责确认状态，但当前版本不会把回执费用放进 fee 字段。
+        这里先从 Gateway 读取当前网络的 RPC 地址，再读取 receipt；只用于账单中
+        尚未保存费用的旧记录，成功后由调用方持久化，避免每次刷新重复请求。
+        """
+        try:
+            chain, network = self.parse_network_id(network_id)
+            if chain != "ethereum":
+                return None
+            status = await self._request("GET", f"chains/{chain}/status", params={"network": network})
+            rpc_url = status.get("rpcUrl") if isinstance(status, dict) else None
+            if not isinstance(rpc_url, str) or not rpc_url.startswith(("https://", "http://")):
+                return None
+            session = await self._get_session()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_getTransactionReceipt",
+                "params": [tx_hash],
+            }
+            async with session.post(rpc_url, json=payload) as response:
+                if not response.ok:
+                    logger.warning("Unable to read transaction receipt for %s: HTTP %s", tx_hash, response.status)
+                    return None
+                data = await response.json()
+            receipt = data.get("result") if isinstance(data, dict) else None
+            if not isinstance(receipt, dict):
+                return None
+            gas_used = receipt.get("gasUsed")
+            gas_price = receipt.get("effectiveGasPrice")
+            if not isinstance(gas_used, str) or not isinstance(gas_price, str):
+                return None
+            return Decimal(int(gas_used, 16)) * Decimal(int(gas_price, 16)) / Decimal(10 ** 18)
+        except (ValueError, TypeError, aiohttp.ClientError) as exc:
+            logger.warning("Unable to read actual Gas for %s: %s", tx_hash, exc)
             return None
