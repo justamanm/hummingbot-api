@@ -27,12 +27,14 @@ async def get_microduck_quote(
     network: str = Query(default="robinhoodchain"),
     dex: str = Query(default="uniswap"),
     trading_type: str = Query(default="router"),
+    source_bot_name: str = Query(default="", max_length=255),
 ):
     """同组 Bot 共用参考报价；接口不用于交易前的最终报价。"""
     try:
         return await microduck_quote_service.get_quote(
             group=group, side=side, amount=amount, max_age_seconds=max_age_seconds,
             chain=chain, network=network, dex=dex, trading_type=trading_type,
+            source_bot_name=source_bot_name,
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

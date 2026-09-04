@@ -36,6 +36,7 @@ class MicroduckQuoteService:
         side: str,
         amount: Decimal,
         max_age_seconds: float,
+        source_bot_name: str = "",
     ) -> dict:
         clean_group = group.strip()
         if not clean_group:
@@ -46,13 +47,13 @@ class MicroduckQuoteService:
         now = time.monotonic()
         cached = self._cache.get(key)
         if cached and now - cached["fetched_at"] < max_age_seconds:
-            return {**cached["quote"], "shared_quote": True, "shared_cache_age_seconds": round(now - cached["fetched_at"], 3)}
+            return self._shared_response(cached, clean_group, now, cache_hit=True)
 
         async with self._lock:
             now = time.monotonic()
             cached = self._cache.get(key)
             if cached and now - cached["fetched_at"] < max_age_seconds:
-                return {**cached["quote"], "shared_quote": True, "shared_cache_age_seconds": round(now - cached["fetched_at"], 3)}
+                return self._shared_response(cached, clean_group, now, cache_hit=True)
             quote = check_gateway_error(await self._gateway.quote_swap(
                 connector=f"{dex}/{trading_type}",
                 chain_network=f"{chain}-{network}",
@@ -62,8 +63,24 @@ class MicroduckQuoteService:
                 side=side,
                 slippage_pct=0,
             ))
-            self._cache[key] = {"quote": quote, "fetched_at": time.monotonic()}
-            return {**quote, "shared_quote": True, "shared_cache_age_seconds": 0.0}
+            cached = {
+                "quote": quote,
+                "fetched_at": time.monotonic(),
+                "source_bot_name": source_bot_name.strip(),
+            }
+            self._cache[key] = cached
+            return self._shared_response(cached, clean_group, cached["fetched_at"], cache_hit=False)
+
+    @staticmethod
+    def _shared_response(cached: dict, group: str, now: float, *, cache_hit: bool) -> dict:
+        return {
+            **cached["quote"],
+            "shared_quote": True,
+            "shared_quote_group": group,
+            "shared_cache_hit": cache_hit,
+            "shared_cache_age_seconds": round(max(0.0, now - cached["fetched_at"]), 3),
+            "shared_quote_source_bot_name": cached.get("source_bot_name") or None,
+        }
 
 
 microduck_quote_service = MicroduckQuoteService()

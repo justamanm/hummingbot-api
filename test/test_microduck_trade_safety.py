@@ -37,6 +37,7 @@ def bare_controller() -> MicroduckProfitTrailing:
         trading_type="router",
         wallet_address="0xabc",
         chain="ethereum",
+        price_query_group=None,
     )
     return controller
 
@@ -247,6 +248,28 @@ async def test_timed_reference_quote_logs_price_and_elapsed_time():
     assert "方向=买入" in log_message
     assert "价格=0.030000美元" in log_message
     assert "耗时=" in log_message
+
+
+@pytest.mark.asyncio
+async def test_timed_reference_quote_logs_group_cache_price_and_source():
+    controller = bare_controller()
+    controller.config.price_query_group = "group1"
+    controller._shared_reference_quote = AsyncMock(return_value={
+        "amountIn": "0.0261",
+        "shared_quote": True,
+        "shared_quote_group": "group1",
+        "shared_cache_hit": True,
+        "shared_cache_age_seconds": 2.3,
+        "shared_quote_source_bot_name": "bot-a",
+    })
+
+    await controller._timed_reference_quote(Decimal("1"), TradeType.BUY)
+
+    log_message = controller.logger.return_value.info.call_args.args[0]
+    assert "命中分组缓存" in log_message
+    assert "缓存=2.3秒" in log_message
+    assert "缓存价格=0.026100美元" in log_message
+    assert "来源Bot=bot-a" in log_message
 
 
 @pytest.mark.asyncio

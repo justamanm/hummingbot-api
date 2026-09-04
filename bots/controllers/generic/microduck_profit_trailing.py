@@ -464,6 +464,10 @@ class MicroduckProfitTrailing(ControllerBase):
         self._previous_sell_reference_price_usd: Optional[Decimal] = None
         self.last_price_quote_completed_at: Optional[str] = None
         self.last_price_quote_route: Optional[str] = None
+        self.last_price_query_group: Optional[str] = None
+        self.last_price_quote_cache_hit = False
+        self.last_price_quote_cache_age_seconds: Optional[float] = None
+        self.last_price_quote_source_bot_name: Optional[str] = None
         self._startup_logged = False
         self._last_status_log_timestamp = 0.0
         self._last_reference_quote_log_timestamp = 0.0
@@ -549,6 +553,10 @@ class MicroduckProfitTrailing(ControllerBase):
         self._previous_sell_reference_price_usd = None
         self.last_price_quote_completed_at = None
         self.last_price_quote_route = None
+        self.last_price_query_group = None
+        self.last_price_quote_cache_hit = False
+        self.last_price_quote_cache_age_seconds = None
+        self.last_price_quote_source_bot_name = None
         self._last_status_log_timestamp = 0.0
         self._save_state()
         self.logger().info(
@@ -937,6 +945,7 @@ class MicroduckProfitTrailing(ControllerBase):
             "network": self.config.network,
             "dex": self.config.dex,
             "trading_type": self.config.trading_type,
+            "source_bot_name": self._bot_instance_name(),
         }
         timeout = aiohttp.ClientTimeout(total=REFERENCE_QUOTE_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -948,6 +957,16 @@ class MicroduckProfitTrailing(ControllerBase):
             raise ValueError("共享报价服务返回格式无效")
         return payload
 
+    @staticmethod
+    def _bot_instance_name() -> str:
+        """取得当前 Hummingbot 实例名称，供共享报价记录真实来源。"""
+        try:
+            from hummingbot.client.hummingbot_application import HummingbotApplication
+
+            return str(HummingbotApplication.main_application().instance_id or "")
+        except Exception:
+            return ""
+
     async def _timed_reference_quote(
         self, amount: Decimal, side: TradeType, *, allow_shared: bool = True,
     ) -> dict:
@@ -957,7 +976,7 @@ class MicroduckProfitTrailing(ControllerBase):
         try:
             quote = await asyncio.wait_for(
                 self._shared_reference_quote(amount, side)
-                if allow_shared and self.config.price_query_group
+                if allow_shared and getattr(self.config, "price_query_group", None)
                 else self._reference_quote(amount, side),
                 timeout=REFERENCE_QUOTE_TIMEOUT_SECONDS,
             )
@@ -983,10 +1002,28 @@ class MicroduckProfitTrailing(ControllerBase):
         total = Decimal(str(quote.get(amount_key, "0")))
         unit_price = total / amount if amount > 0 else Decimal("0")
         route = str(quote.get("routePath") or "未知路由")
-        source = (
-            f"共享分组={self.config.price_query_group}，缓存={quote.get('shared_cache_age_seconds', 0):.1f}秒；"
-            if quote.get("shared_quote") else ""
-        )
+        shared_quote = bool(quote.get("shared_quote"))
+        shared_group = str(quote.get("shared_quote_group") or "").strip() or None
+        cache_hit = shared_quote and quote.get("shared_cache_hit") is True
+        cache_age = quote.get("shared_cache_age_seconds") if shared_quote else None
+        source_bot_name = str(quote.get("shared_quote_source_bot_name") or "").strip() or None
+        self.last_price_query_group = shared_group
+        self.last_price_quote_cache_hit = cache_hit
+        self.last_price_quote_cache_age_seconds = float(cache_age) if cache_age is not None else None
+        self.last_price_quote_source_bot_name = source_bot_name
+        if shared_quote and cache_hit:
+            source = (
+                f"命中分组缓存：分组={shared_group or '未知'}；"
+                f"缓存={self.last_price_quote_cache_age_seconds or 0:.1f}秒；"
+                f"缓存价格={unit_price:.6f}美元；来源Bot={source_bot_name or '未知'}；"
+            )
+        elif shared_quote:
+            source = (
+                f"实际查询并写入分组缓存：分组={shared_group or '未知'}；"
+                f"价格={unit_price:.6f}美元；来源Bot={source_bot_name or self._bot_instance_name() or '未知'}；"
+            )
+        else:
+            source = ""
         completed_at = monotonic()
         if (
             completed_at - getattr(self, "_last_reference_quote_log_timestamp", 0.0)
@@ -1639,6 +1676,10 @@ class MicroduckProfitTrailing(ControllerBase):
                 and price_quote_age_seconds <= MAX_REFERENCE_QUOTE_AGE_SECONDS
             ),
             "price_quote_route": self.last_price_quote_route,
+            "price_query_group": self.last_price_query_group,
+            "price_quote_cache_hit": self.last_price_quote_cache_hit,
+            "price_quote_cache_age_seconds": self.last_price_quote_cache_age_seconds,
+            "price_quote_source_bot_name": self.last_price_quote_source_bot_name,
             "run_id": self.run_health.run_id,
             "run_started_at": self.run_health.run_started_at,
             "last_success_at": self.run_health.last_success_at,
@@ -1677,7 +1718,6 @@ class MicroduckProfitTrailing(ControllerBase):
             "sell_drop_trigger_usd": str(self.rule.sell_drop_trigger_usd),
             "sell_price_downward_tolerance_usd": str(self.rule.sell_price_downward_tolerance_usd),
             "sell_tolerance_uses_final_target": True,
-            "price_query_group": self.config.price_query_group,
             "sell_price_max_usd": None if self.rule.sell_price_max_usd is None else str(self.rule.sell_price_max_usd),
             "position_base": str(self.position_base),
             "wallet_address": self.config.wallet_address,
