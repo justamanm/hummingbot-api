@@ -100,7 +100,7 @@ def test_legacy_config_defaults_to_budget_mode():
 
 def test_default_normal_check_interval_is_four_seconds():
     assert MicroduckProfitTrailingConfig(id="interval").normal_check_interval == 4
-    assert MicroduckProfitTrailingConfig(id="interval").buy_trailing_check_interval == 2
+    assert MicroduckProfitTrailingConfig(id="interval").buy_trailing_check_interval == 1
     assert MicroduckProfitTrailingConfig(id="interval").sell_trailing_check_interval == 2
 
 

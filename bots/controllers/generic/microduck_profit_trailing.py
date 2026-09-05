@@ -346,7 +346,7 @@ class MicroduckProfitTrailingConfig(ControllerConfigBase):
     # 留空表示不设上限。保留对旧配置中 0 的兼容，见下方的预处理。
     sell_price_max_usd: Optional[Decimal] = Field(default=None, ge=Decimal("0"), json_schema_extra={"is_updatable": True})
     normal_check_interval: int = Field(default=4, ge=3, json_schema_extra={"is_updatable": True})
-    buy_trailing_check_interval: int = Field(default=2, ge=1, json_schema_extra={"is_updatable": True})
+    buy_trailing_check_interval: int = Field(default=1, ge=1, json_schema_extra={"is_updatable": True})
     sell_trailing_check_interval: int = Field(default=2, ge=1, json_schema_extra={"is_updatable": True})
     status_log_interval_seconds: int = Field(
         default=60,
