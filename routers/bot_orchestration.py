@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
 
 
+def _bot_log_path(bot_name: str, log_type: str) -> str:
+    """Resolve one Bot log without allowing paths outside its instance directory."""
+    if not bot_name or bot_name != os.path.basename(bot_name):
+        raise HTTPException(status_code=400, detail="Bot 名称无效")
+    log_names = {
+        "main": f"logs_{bot_name}.log",
+        "system": "logs_hummingbot.log",
+        "error": "errors.log",
+    }
+    instance_root = os.path.realpath(os.path.join(os.getcwd(), "bots", "instances", bot_name))
+    log_path = os.path.realpath(os.path.join(instance_root, "logs", log_names[log_type]))
+    if os.path.commonpath([instance_root, log_path]) != instance_root:
+        raise HTTPException(status_code=400, detail="日志路径无效")
+    return log_path
+
+
 def _expected_usdg_reservation(config: dict[str, Any]) -> Decimal | None:
     """Return one live Microduck Bot's maximum next-buy USDG use."""
     if str(config.get("controller_name") or "") != "microduck_profit_trailing":
@@ -418,6 +434,42 @@ async def restart_bot(
     if not response.get("success"):
         raise HTTPException(status_code=404, detail=response.get("message", "Bot restart failed"))
     return {"status": "success", "response": response}
+
+
+@router.get("/bots/{bot_name}/full-logs")
+async def get_bot_full_logs(
+    bot_name: str,
+    log_type: str = Query(default="main", pattern="^(main|system|error)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=2000),
+    query: str = Query(default="", max_length=120),
+):
+    """Read a Bot's persisted log in pages, newest page first."""
+    log_path = _bot_log_path(bot_name, log_type)
+    if not os.path.isfile(log_path):
+        raise HTTPException(status_code=404, detail="该 Bot 的日志文件不存在")
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            lines = log_file.read().splitlines()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"读取 Bot 日志失败：{exc}") from exc
+
+    clean_query = query.strip().casefold()
+    if clean_query:
+        lines = [line for line in lines if clean_query in line.casefold()]
+    total = len(lines)
+    end = max(0, total - offset)
+    start = max(0, end - limit)
+    page = [{"number": index + 1, "text": lines[index]} for index in range(start, end)]
+    return {
+        "bot_name": bot_name,
+        "log_type": log_type,
+        "lines": page,
+        "total_lines": total,
+        "next_offset": offset + len(page),
+        "has_more": start > 0,
+        "file_size": os.path.getsize(log_path),
+    }
 
 
 @router.get("/bot-runs")
