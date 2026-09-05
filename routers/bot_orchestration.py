@@ -44,8 +44,10 @@ def _parse_log_time(value: str | None, field_name: str) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"{field_name} 时间格式无效") from exc
-    # Bot 文件使用服务器本地时间且不带时区。筛选也统一按页面输入的本地时间比较。
-    return parsed.replace(tzinfo=None)
+    # Bot 文件使用 UTC 且不带时区；带时区的页面输入必须先换算为 UTC，不能直接去掉时区。
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _expected_usdg_reservation(config: dict[str, Any]) -> Decimal | None:
