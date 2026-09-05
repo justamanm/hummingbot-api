@@ -689,7 +689,12 @@ class MicroduckProfitTrailing(ControllerBase):
             return
 
         state = self.rule.state
-        prefix = f"[运行:{self.run_health.run_id}] "
+        category = (
+            "买入跟踪" if state == RuleState.TRAILING_BUY
+            else "卖出跟踪" if state == RuleState.TRAILING
+            else "普通状态"
+        )
+        prefix = f"[运行:{self.run_health.run_id}] [分类:{category}] "
         current_buy_price = f"{self.last_buy_price_usd:.6f}" if self.last_buy_price_usd is not None else "暂无"
         current_sell_price = (
             f"{self.last_unit_sell_price_usd:.6f}"
@@ -820,7 +825,7 @@ class MicroduckProfitTrailing(ControllerBase):
             )
         title = "进入买入跟踪" if entered else "买入跟踪中"
         self.logger().info(
-            f"[运行:{self.run_health.run_id}] {title}，{current_price}，{lowest_price}，"
+            f"[运行:{self.run_health.run_id}] [分类:买入跟踪] {title}，{current_price}，{lowest_price}，"
             f"相对配置的买入价下跌 {self.rule.buy_drawdown_percent:.2f}%，"
             f"当前实时回弹 {current_rebound_percent:.2f}%（${current_rebound_usd:.4f}），"
             f"最大允许反弹 {self.rule.effective_buy_rebound_percent:.2f}%"
@@ -876,7 +881,7 @@ class MicroduckProfitTrailing(ControllerBase):
             drop_formula = f"${self.rule.peak_unit_sell_price_usd:.6f} - ${self.rule.sell_trailing_drop_usd:.6f} = ${self.rule.sell_drop_trigger_usd:.6f}"
         title = "进入卖出跟踪" if entered else "卖出跟踪中"
         self.logger().info(
-            f"[运行:{self.run_health.run_id}] {title}，{current_price}，{highest_price}，"
+            f"[运行:{self.run_health.run_id}] [分类:卖出跟踪] {title}，{current_price}，{highest_price}，"
             f"{compared_text}，当前实时回落 {current_drop_percent:.2f}%，"
             f"最大允许回落 {self._sell_drop_description()}"
             f"（${self.rule.sell_drop_trigger_usd:.6f}），"
@@ -1016,12 +1021,12 @@ class MicroduckProfitTrailing(ControllerBase):
                 f"MICRODUCK/USDG报价超时：方向={direction}；数量={amount:.6f} MICRODUCK；"
                 f"超时={REFERENCE_QUOTE_TIMEOUT_SECONDS:.1f}秒；实际等待={elapsed:.3f}秒"
             )
-            self.logger().warning(f"[运行:{self.run_health.run_id}] {message}")
+            self.logger().warning(f"[运行:{self.run_health.run_id}] [分类:报价查询] {message}")
             raise ValueError(message) from exc
         except Exception as exc:
             elapsed = monotonic() - started_at
             self.logger().warning(
-                f"[运行:{self.run_health.run_id}] MICRODUCK/USDG报价失败："
+                f"[运行:{self.run_health.run_id}] [分类:报价查询] MICRODUCK/USDG报价失败："
                 f"方向={direction}；数量={amount:.6f} MICRODUCK；耗时={elapsed:.3f}秒；"
                 f"异常类型={type(exc).__name__}；原因={exc}"
             )
@@ -1066,7 +1071,7 @@ class MicroduckProfitTrailing(ControllerBase):
             >= REFERENCE_QUOTE_LOG_INTERVAL_SECONDS
         ):
             self.logger().info(
-                f"[运行:{self.run_health.run_id}] MICRODUCK/USDG报价成功："
+                f"[运行:{self.run_health.run_id}] [分类:报价查询] MICRODUCK/USDG报价成功："
                 f"方向={direction}；数量={amount:.6f} MICRODUCK；"
                 f"价格={unit_price:.6f}美元；耗时={elapsed:.3f}秒；{source}路由={route}"
             )

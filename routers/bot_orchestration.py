@@ -12,6 +12,7 @@ from services.bots_orchestrator import BotsOrchestrator
 from services.docker_service import DockerService
 from services.accounts_service import AccountsService
 from utils.bot_archiver import BotArchiver
+from utils.bot_logs import filter_log_lines
 from utils.file_system import fs_util
 
 # Create module-specific logger
@@ -34,6 +35,17 @@ def _bot_log_path(bot_name: str, log_type: str) -> str:
     if os.path.commonpath([instance_root, log_path]) != instance_root:
         raise HTTPException(status_code=400, detail="日志路径无效")
     return log_path
+
+
+def _parse_log_time(value: str | None, field_name: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} 时间格式无效") from exc
+    # Bot 文件使用服务器本地时间且不带时区。筛选也统一按页面输入的本地时间比较。
+    return parsed.replace(tzinfo=None)
 
 
 def _expected_usdg_reservation(config: dict[str, Any]) -> Decimal | None:
@@ -443,6 +455,9 @@ async def get_bot_full_logs(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=2000),
     query: str = Query(default="", max_length=120),
+    category: str = Query(default="all", pattern="^(all|ordinary|buy_tracking|sell_tracking|quote|other)$"),
+    start_time: str | None = Query(default=None, max_length=40),
+    end_time: str | None = Query(default=None, max_length=40),
 ):
     """Read a Bot's persisted log in pages, newest page first."""
     log_path = _bot_log_path(bot_name, log_type)
@@ -454,20 +469,26 @@ async def get_bot_full_logs(
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"读取 Bot 日志失败：{exc}") from exc
 
-    clean_query = query.strip().casefold()
-    if clean_query:
-        lines = [line for line in lines if clean_query in line.casefold()]
-    total = len(lines)
-    end = max(0, total - offset)
-    start = max(0, end - limit)
-    page = [{"number": index + 1, "text": lines[index]} for index in range(start, end)]
+    start_at = _parse_log_time(start_time, "开始")
+    end_at = _parse_log_time(end_time, "结束")
+    if start_at is not None and end_at is not None and start_at > end_at:
+        raise HTTPException(status_code=422, detail="开始时间不能晚于结束时间")
+    entries = filter_log_lines(
+        lines,
+        query=query,
+        category=category,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    total = len(entries)
+    page = entries[offset:offset + limit]
     return {
         "bot_name": bot_name,
         "log_type": log_type,
         "lines": page,
         "total_lines": total,
         "next_offset": offset + len(page),
-        "has_more": start > 0,
+        "has_more": offset + len(page) < total,
         "file_size": os.path.getsize(log_path),
     }
 

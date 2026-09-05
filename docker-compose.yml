@@ -11,6 +11,8 @@ services:
       - ./services/docker_service.py:/hummingbot-api/services/docker_service.py:ro
       # 重新部署同一控制器时，从最近归档实例恢复持仓与交易状态。
       - ./utils/controller_state.py:/hummingbot-api/utils/controller_state.py:ro
+      # 完整日志分类、时间筛选和最新优先排序。
+      - ./utils/bot_logs.py:/hummingbot-api/utils/bot_logs.py:ro
       # 原样保存控制器 YAML，保留用户写入的注释、空行和字段顺序。
       - ./routers/controllers.py:/hummingbot-api/routers/controllers.py:ro
       # 部署时接收模板覆盖值，并只写入本次 Bot 的独立配置。
