@@ -109,6 +109,14 @@ def test_default_normal_check_interval_is_four_seconds():
     assert config.sell_trailing_check_interval == 2
 
 
+def test_sell_waiting_and_trailing_use_the_bot_sell_interval():
+    rule = trailing_rule(normal_check_interval=4, sell_trailing_check_interval=2)
+    rule.state = RuleState.HOLDING
+    assert rule.check_interval == 2
+    rule.state = RuleState.TRAILING
+    assert rule.check_interval == 2
+
+
 def test_auto_start_next_cycle_is_disabled_by_default():
     assert MicroduckProfitTrailingConfig(id="single-cycle").auto_start_next_cycle is False
 
@@ -312,6 +320,36 @@ async def test_timed_reference_quote_logs_group_cache_price_and_source():
     assert "缓存=2.3秒" in log_message
     assert "缓存价格=0.026100美元" in log_message
     assert "来源Bot=bot-a" in log_message
+
+
+@pytest.mark.asyncio
+async def test_grouped_sell_quote_is_still_independent():
+    controller = bare_controller()
+    controller.config.price_query_group = "group1"
+    controller._shared_reference_quote = AsyncMock()
+    controller._reference_quote = AsyncMock(return_value={"amountOut": "0.0261"})
+
+    await controller._timed_reference_quote(Decimal("1"), TradeType.SELL)
+
+    controller._shared_reference_quote.assert_not_awaited()
+    controller._reference_quote.assert_awaited_once_with(Decimal("1"), TradeType.SELL)
+
+
+@pytest.mark.asyncio
+async def test_grouped_buy_quote_applies_group_interval():
+    controller = bare_controller()
+    controller.config.price_query_group = "group1"
+    controller.rule = trailing_rule(normal_check_interval=4, buy_trailing_check_interval=1)
+    controller.rule.state = RuleState.TRAILING_BUY
+    controller._shared_reference_quote = AsyncMock(return_value={
+        "amountIn": "0.0261",
+        "shared_quote": True,
+        "effective_interval_seconds": 3,
+    })
+
+    await controller._timed_reference_quote(Decimal("1"), TradeType.BUY)
+
+    assert controller.rule.buy_trailing_check_interval == 3
 
 
 @pytest.mark.asyncio

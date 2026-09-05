@@ -57,7 +57,8 @@ def _microduck_config_references() -> list[dict[str, Any]]:
     return refs
 
 
-def _group_payload(name: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
+def _group_payload(item, refs: list[dict[str, Any]]) -> dict[str, Any]:
+    name = item.name
     _, normalized = normalize_price_query_group(name)
     matching = [
         {key: ref[key] for key in ("config_id", "bot_name", "display_name")}
@@ -67,6 +68,8 @@ def _group_payload(name: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "name": name,
         "normalized_name": normalized,
+        "normal_check_interval": item.normal_check_interval,
+        "buy_trailing_check_interval": item.buy_trailing_check_interval,
         "reference_count": len(matching),
         "references": matching,
     }
@@ -80,7 +83,7 @@ async def _list_groups(repo: PriceQueryGroupRepository) -> list[dict[str, Any]]:
         clean, normalized = normalize_price_query_group(ref["name"])
         if normalized not in existing:
             existing[normalized] = await repo.create(clean)
-    return [_group_payload(item.name, refs) for item in sorted(existing.values(), key=lambda item: item.normalized_name)]
+    return [_group_payload(item, refs) for item in sorted(existing.values(), key=lambda item: item.normalized_name)]
 
 
 @router.get("")
@@ -97,8 +100,10 @@ async def create_price_query_group(
 ):
     try:
         async with db.get_session_context() as session:
-            item = await PriceQueryGroupRepository(session).create(body.name)
-            return _group_payload(item.name, _microduck_config_references())
+            item = await PriceQueryGroupRepository(session).create(
+                body.name, body.normal_check_interval, body.buy_trailing_check_interval,
+            )
+            return _group_payload(item, _microduck_config_references())
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -124,7 +129,11 @@ async def rename_price_query_group(
                 if not any(normalize_price_query_group(ref["name"])[1] == old_normalized for ref in refs):
                     raise HTTPException(status_code=404, detail="报价分组不存在")
                 item = await repo.create(old_name)
-            item = await repo.rename(item, new_name)
+            item = await repo.update_settings(
+                item, name=new_name,
+                normal_check_interval=body.normal_check_interval,
+                buy_trailing_check_interval=body.buy_trailing_check_interval,
+            )
             updated: list[dict[str, Any]] = []
             for ref in refs:
                 if normalize_price_query_group(ref["name"])[1] != old_normalized:
@@ -137,7 +146,7 @@ async def rename_price_query_group(
                     override=True,
                 )
                 updated.append({key: ref[key] for key in ("config_id", "bot_name", "display_name")})
-            return {"group": _group_payload(item.name, _microduck_config_references()), "updated": updated}
+            return {"group": _group_payload(item, _microduck_config_references()), "updated": updated}
     except HTTPException:
         raise
     except ValueError as exc:
@@ -154,13 +163,13 @@ async def delete_price_query_group(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     refs = _microduck_config_references()
-    payload = _group_payload(clean, refs)
-    if payload["reference_count"]:
-        raise HTTPException(status_code=409, detail={"message": "报价分组仍被 Bot 使用，不能删除", "references": payload["references"]})
     async with db.get_session_context() as session:
         repo = PriceQueryGroupRepository(session)
         item = await repo.get(clean)
         if item is None:
             raise HTTPException(status_code=404, detail="报价分组不存在")
+        payload = _group_payload(item, refs)
+        if payload["reference_count"]:
+            raise HTTPException(status_code=409, detail={"message": "报价分组仍被 Bot 使用，不能删除", "references": payload["references"]})
         await session.delete(item)
     return {"deleted": True, "name": clean}

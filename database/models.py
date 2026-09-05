@@ -24,6 +24,8 @@ class PriceQueryGroup(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(64), nullable=False)
     normalized_name = Column(String(64), nullable=False, unique=True, index=True)
+    normal_check_interval = Column(Integer, nullable=False, default=4, server_default="4")
+    buy_trailing_check_interval = Column(Integer, nullable=False, default=1, server_default="1")
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

@@ -116,6 +116,14 @@ class AsyncDatabaseManager:
                 "strategy_trade_records", "approval_amount",
                 "ALTER TABLE strategy_trade_records ADD COLUMN approval_amount NUMERIC(30,18)"
             ),
+            (
+                "price_query_groups", "normal_check_interval",
+                "ALTER TABLE price_query_groups ADD COLUMN normal_check_interval INTEGER NOT NULL DEFAULT 4"
+            ),
+            (
+                "price_query_groups", "buy_trailing_check_interval",
+                "ALTER TABLE price_query_groups ADD COLUMN buy_trailing_check_interval INTEGER NOT NULL DEFAULT 1"
+            ),
         ]
         for table, column, sql in migrations:
             try:

@@ -220,7 +220,7 @@ class MicroduckTrailingRule:
     def check_interval(self) -> int:
         if self.state == RuleState.TRAILING_BUY:
             return self.buy_trailing_check_interval
-        if self.state == RuleState.TRAILING:
+        if self.state in {RuleState.HOLDING, RuleState.TRAILING}:
             return self.sell_trailing_check_interval
         return self.normal_check_interval
 
@@ -970,6 +970,7 @@ class MicroduckProfitTrailing(ControllerBase):
             "side": side.name,
             "amount": format(amount, "f"),
             "max_age_seconds": str(self.rule.check_interval),
+            "query_phase": "buy" if self.rule.state == RuleState.TRAILING_BUY else "normal",
             "chain": self.config.chain,
             "network": self.config.network,
             "dex": self.config.dex,
@@ -1005,7 +1006,7 @@ class MicroduckProfitTrailing(ControllerBase):
         try:
             quote = await asyncio.wait_for(
                 self._shared_reference_quote(amount, side)
-                if allow_shared and getattr(self.config, "price_query_group", None)
+                if allow_shared and side == TradeType.BUY and getattr(self.config, "price_query_group", None)
                 else self._reference_quote(amount, side),
                 timeout=REFERENCE_QUOTE_TIMEOUT_SECONDS,
             )
@@ -1032,6 +1033,12 @@ class MicroduckProfitTrailing(ControllerBase):
         unit_price = total / amount if amount > 0 else Decimal("0")
         route = str(quote.get("routePath") or "未知路由")
         shared_quote = bool(quote.get("shared_quote"))
+        if shared_quote and quote.get("effective_interval_seconds") is not None:
+            interval = max(1, int(float(quote["effective_interval_seconds"])))
+            if self.rule.state == RuleState.TRAILING_BUY:
+                self.rule.buy_trailing_check_interval = interval
+            else:
+                self.rule.normal_check_interval = interval
         shared_group = str(quote.get("shared_quote_group") or "").strip() or None
         cache_hit = shared_quote and quote.get("shared_cache_hit") is True
         cache_age = quote.get("shared_cache_age_seconds") if shared_quote else None
