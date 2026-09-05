@@ -857,14 +857,14 @@ class MicroduckProfitTrailing(ControllerBase):
             )
         configured_sell_price = self._estimated_sell_price_usd()
         configured_sell_target = self._estimated_sell_target_usd()
-        compared_to_sell_price = (
-            (current_price_usd / configured_sell_price - Decimal("1")) * Decimal("100")
-            if configured_sell_price > 0 else Decimal("0")
+        compared_to_sell_target = (
+            (current_price_usd / configured_sell_target - Decimal("1")) * Decimal("100")
+            if configured_sell_target > 0 else Decimal("0")
         )
         compared_text = (
-            f"相对配置的卖出价格上涨 {compared_to_sell_price:.2f}%"
-            if compared_to_sell_price >= 0
-            else f"相对配置的卖出价格下跌 {abs(compared_to_sell_price):.2f}%"
+            f"相对配置的卖出目标价上涨 {compared_to_sell_target:.2f}%"
+            if compared_to_sell_target >= 0
+            else f"相对配置的卖出目标价下跌 {abs(compared_to_sell_target):.2f}%"
         )
         if self.rule.sell_trailing_drop_mode == "percentage":
             drop_formula = (

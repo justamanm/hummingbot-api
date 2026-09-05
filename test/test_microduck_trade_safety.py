@@ -176,6 +176,26 @@ def test_sell_tolerance_applies_after_the_fixed_sell_cap():
     assert rule.calculated_sell_unit_price_usd == Decimal("0.037")
 
 
+def test_sell_tracking_change_uses_target_before_tolerance():
+    controller = bare_controller()
+    controller.rule = trailing_rule(
+        state=RuleState.TRAILING,
+        entry_unit_price_usd=Decimal("0.02"),
+        peak_unit_sell_price_usd=Decimal("0.031"),
+        sell_profit_multiple=Decimal("1.5"),
+        sell_price_max_usd=None,
+        sell_price_downward_tolerance_usd=Decimal("0.001"),
+    )
+    controller._previous_sell_reference_price_usd = Decimal("0.03")
+    controller._last_status_log_timestamp = 0.0
+
+    controller._log_sell_tracking_status(Decimal("0.03"), 10.0)
+
+    message = controller.logger.return_value.info.call_args.args[0]
+    assert "相对配置的卖出目标价上涨 0.00%" in message
+    assert "相对配置的卖出目标价上涨 3.45%" not in message
+
+
 def test_tolerances_only_apply_to_final_trade_limits_not_tracking_entry():
     rule = trailing_rule(
         buy_price_min_usd=Decimal("0.020"),
