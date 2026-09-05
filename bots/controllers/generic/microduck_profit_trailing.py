@@ -350,6 +350,7 @@ class MicroduckProfitTrailingConfig(ControllerConfigBase):
     )
 
     live_trading: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    auto_start_next_cycle: bool = Field(default=False, json_schema_extra={"is_updatable": True})
 
     @model_validator(mode="before")
     @classmethod
@@ -521,14 +522,17 @@ class MicroduckProfitTrailing(ControllerBase):
                 changed.append(name)
         for name in (
             "buy_size_mode", "buy_budget_usd", "buy_amount_base",
-            "price_query_group", "live_trading", "status_log_interval_seconds",
+            "price_query_group", "live_trading", "auto_start_next_cycle", "status_log_interval_seconds",
         ):
             if getattr(previous, name) != getattr(self.config, name):
                 changed.append(name)
         trading_fields = set(rule_fields) | {
             "buy_size_mode", "buy_budget_usd", "buy_amount_base", "live_trading",
         }
-        if restart_completed_cycle and any(name in trading_fields for name in changed):
+        should_start_completed_cycle = any(name in trading_fields for name in changed) or (
+            "auto_start_next_cycle" in changed and self.config.auto_start_next_cycle
+        )
+        if restart_completed_cycle and should_start_completed_cycle:
             self._start_next_cycle_after_config_change()
         if changed:
             self.logger().info(
@@ -537,6 +541,20 @@ class MicroduckProfitTrailing(ControllerBase):
 
     def _start_next_cycle_after_config_change(self) -> None:
         """已完成策略修改交易参数后，安全地开始新一轮，而不抹去历史账目。"""
+        self._start_next_cycle(
+            "已完成策略检测到交易参数变更，已开始新一轮，等待进入买入范围；"
+            "历史交易和累计利润已保留"
+        )
+
+    def _start_next_cycle_after_sell(self) -> None:
+        """卖出确认后按配置自动开始下一轮。"""
+        self._start_next_cycle(
+            "卖出交易已确认，已按配置自动开始下一轮，等待进入买入范围；"
+            "历史交易和累计利润已保留"
+        )
+
+    def _start_next_cycle(self, message: str) -> None:
+        """清除单轮状态，但保留累计账目。"""
         self.rule.start_next_cycle()
         self.position_base = Decimal("0")
         self.pending_executor_id = None
@@ -559,10 +577,7 @@ class MicroduckProfitTrailing(ControllerBase):
         self.last_price_quote_source_bot_name = None
         self._last_status_log_timestamp = 0.0
         self._save_state()
-        self.logger().info(
-            f"[运行:{self.run_health.run_id}] 已完成策略检测到交易参数变更，"
-            "已开始新一轮，等待进入买入范围；历史交易和累计利润已保留"
-        )
+        self.logger().info(f"[运行:{self.run_health.run_id}] {message}")
 
     def _load_state(self) -> None:
         if not self._state_path.exists():
@@ -1354,6 +1369,8 @@ class MicroduckProfitTrailing(ControllerBase):
                 f"[运行:{self.run_health.run_id}] 卖出交易已确认成功，本轮策略完成："
                 f"卖出={sold_base:.6f} MICRODUCK，收到={received_usdg:.6f} USDG"
             )
+            if self.config.auto_start_next_cycle:
+                self._start_next_cycle_after_sell()
         self._save_state()
 
     async def update_processed_data(self):
@@ -1690,6 +1707,7 @@ class MicroduckProfitTrailing(ControllerBase):
             "last_run_failure": self.run_health.last_failure,
             "state": self.rule.state.value,
             "live_trading": self.config.live_trading,
+            "auto_start_next_cycle": self.config.auto_start_next_cycle,
             "check_interval_seconds": self.rule.check_interval,
             "normal_check_interval": self.rule.normal_check_interval,
             "trailing_check_interval": self.rule.trailing_check_interval,

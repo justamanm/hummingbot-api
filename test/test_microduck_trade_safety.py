@@ -38,6 +38,7 @@ def bare_controller() -> MicroduckProfitTrailing:
         wallet_address="0xabc",
         chain="ethereum",
         price_query_group=None,
+        auto_start_next_cycle=False,
     )
     return controller
 
@@ -98,6 +99,39 @@ def test_legacy_config_defaults_to_budget_mode():
 
 def test_default_normal_check_interval_is_four_seconds():
     assert MicroduckProfitTrailingConfig(id="interval").normal_check_interval == 4
+
+
+def test_auto_start_next_cycle_is_disabled_by_default():
+    assert MicroduckProfitTrailingConfig(id="single-cycle").auto_start_next_cycle is False
+
+
+def test_auto_start_next_cycle_after_sell_preserves_history_and_profit():
+    controller = bare_controller()
+    controller.config.auto_start_next_cycle = True
+    controller.rule = trailing_rule(state=RuleState.COMPLETED)
+    controller.trade_history = [{"side": "BUY"}, {"side": "SELL"}]
+    controller.realized_pnl_quote = Decimal("1.23")
+    controller._last_status_log_timestamp = 10.0
+    controller.last_price_quote_completed_at = "2026-09-05T00:00:00+00:00"
+    controller.last_price_quote_route = "route"
+    controller.last_price_query_group = "group1"
+    controller.last_price_quote_cache_hit = True
+    controller.last_price_quote_cache_age_seconds = 1.0
+    controller.last_price_quote_source_bot_name = "bot-a"
+    controller.last_buy_price_usd = Decimal("0.02")
+    controller.last_expected_sell_usd = Decimal("20")
+    controller.last_min_sell_usd = Decimal("19")
+    controller.last_unit_sell_price_usd = Decimal("0.03")
+    controller._previous_buy_reference_price_usd = Decimal("0.02")
+    controller._previous_sell_reference_price_usd = Decimal("0.03")
+
+    controller._start_next_cycle_after_sell()
+
+    assert controller.rule.state == RuleState.WAITING_TO_BUY
+    assert controller.trade_history == [{"side": "BUY"}, {"side": "SELL"}]
+    assert controller.realized_pnl_quote == Decimal("1.23")
+    assert controller.last_price_quote_completed_at is None
+    assert "自动开始下一轮" in controller.logger.return_value.info.call_args.args[0]
 
 
 def test_sell_price_cap_can_be_unset_and_legacy_zero_means_unset():

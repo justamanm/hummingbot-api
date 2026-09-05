@@ -629,7 +629,11 @@ async def update_bot_controller_config(bot_name: str, controller_name: str, conf
             "sell_trailing_drop_mode", "sell_trailing_drop_usd", "sell_trailing_drop_percent",
             "normal_check_interval", "trailing_check_interval", "live_trading",
         }
-        if runtime_state == "completed" and changed_fields & restart_fields:
+        should_restart_completed = bool(changed_fields & restart_fields) or (
+            "auto_start_next_cycle" in changed_fields
+            and bool(updated_validated.get("auto_start_next_cycle"))
+        )
+        if runtime_state == "completed" and should_restart_completed:
             try:
                 with open(state_path, "r", encoding="utf-8") as file:
                     completed_state = json.load(file) or {}
