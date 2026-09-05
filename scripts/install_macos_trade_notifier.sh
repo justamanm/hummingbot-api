@@ -10,6 +10,7 @@ DATA_DIR="$HOME/Library/Application Support/Microduck"
 LOG_DIR="$HOME/Library/Logs/Microduck"
 PLIST_PATH="$AGENT_DIR/com.microduck.trade-notifier.plist"
 STATE_PATH="$DATA_DIR/trade-notifier-state.json"
+CONTEXT_PATH="$DATA_DIR/notification-context.json"
 NOTIFIER_APP="$DATA_DIR/Microduck Notifications.app"
 NOTIFIER_BIN="$NOTIFIER_APP/Contents/MacOS/MicroduckNotifier"
 
@@ -65,6 +66,8 @@ cat > "$PLIST_PATH" <<EOF
     <string>$DOCKER_BIN</string>
     <string>--native-notifier</string>
     <string>$NOTIFIER_APP</string>
+    <string>--notification-context-file</string>
+    <string>$CONTEXT_PATH</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

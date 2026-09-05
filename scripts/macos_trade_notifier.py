@@ -20,10 +20,18 @@ from typing import Any
 
 
 LOGGER = logging.getLogger("microduck_trade_notifier")
-TEST_NOTIFICATION_TITLE = "Microduck 系统通知测试"
-TEST_NOTIFICATION_BODY = "Mac 后台通知工作正常，关闭网页后也能接收成交通知。"
+TEST_NOTIFICATION_TITLE = "测试 Bot · 买入成功"
+TEST_NOTIFICATION_BODY = "\n".join((
+    "500 MICRODUCK × $0.023919",
+    "实际支出：11.959500 USDG",
+    "",
+    "钱包：钱包-a（…a5336）",
+    "买入后持仓：500 MICRODUCK",
+    "Gas：0.00002600 ETH（约 $0.060000）",
+))
 LOCAL_ORIGIN = re.compile(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$")
 NATIVE_NOTIFIER: str | None = None
+NOTIFICATION_CONTEXT_PATH: Path | None = None
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -73,17 +81,85 @@ def trade_key(trade: dict[str, Any]) -> str:
     ))
 
 
-def format_notification(trade: dict[str, Any]) -> tuple[str, str]:
+def _number(value: Any) -> float:
+    try:
+        number = float(value or 0)
+        return number if number == number else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _trade_metrics(target: dict[str, Any], trades: list[dict[str, Any]]) -> tuple[float, float | None, float | None]:
+    """按一个 Bot/控制器的成交顺序计算成交后持仓和卖出利润。"""
+    related = [item for item in trades if (
+        item.get("bot_name") == target.get("bot_name")
+        and item.get("controller_id") == target.get("controller_id")
+    )]
+    related.sort(key=lambda item: str(item.get("timestamp") or ""))
+    position = 0.0
+    cost = 0.0
+    for item in related:
+        amount = max(_number(item.get("amount_base")), 0)
+        total = max(_number(item.get("total_quote")), 0)
+        profit = None
+        profit_percent = None
+        if str(item.get("side") or "").upper() == "BUY":
+            position += amount
+            cost += total
+        else:
+            sold_cost = min(amount, position) * (cost / position) if position > 0 else 0
+            profit = total - sold_cost if sold_cost > 0 else None
+            profit_percent = profit / sold_cost * 100 if profit is not None and sold_cost > 0 else None
+            position = max(position - amount, 0)
+            cost = max(cost - sold_cost, 0)
+        if trade_key(item) == trade_key(target):
+            return position, profit, profit_percent
+    return position, None, None
+
+
+def load_notification_context() -> dict[str, Any]:
+    if NOTIFICATION_CONTEXT_PATH is None or not NOTIFICATION_CONTEXT_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(NOTIFICATION_CONTEXT_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, TypeError, ValueError):
+        return {}
+
+
+def format_notification(
+    trade: dict[str, Any],
+    all_trades: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     side = str(trade.get("side") or "").upper()
     side_text = "买入" if side == "BUY" else "卖出"
     bot_name = str(trade.get("bot_display_name") or trade.get("bot_name") or "Bot")
-    amount = float(trade.get("amount_base") or 0)
+    amount = _number(trade.get("amount_base"))
     base_token = str(trade.get("base_token") or "")
-    price = float(trade.get("unit_price_usd") or 0)
-    total = float(trade.get("total_quote") or 0)
+    price = _number(trade.get("unit_price_usd"))
+    total = _number(trade.get("total_quote"))
     quote_token = str(trade.get("quote_token") or "USDG")
-    title = f"{bot_name} 已确认{side_text}"
-    body = f"{amount:g} {base_token}，单价 ${price:.6f}，合计 {total:.6f} {quote_token}"
+    position, profit, profit_percent = _trade_metrics(trade, all_trades or [trade])
+    wallet = str(trade.get("wallet_address") or "").lower()
+    aliases = (context or {}).get("wallet_aliases", {})
+    alias = str(aliases.get(wallet) or "") if isinstance(aliases, dict) else ""
+    wallet_text = f"{alias}（…{wallet[-5:]}）" if alias and wallet else f"…{wallet[-5:]}" if wallet else "暂未获取"
+    gas = trade.get("gas_fee_native")
+    gas_value = _number(gas)
+    eth_usd = _number((context or {}).get("eth_usd_price"))
+    gas_text = "暂未获取" if gas is None or gas_value <= 0 else f"{gas_value:.8f} ETH"
+    if gas_value > 0 and eth_usd > 0:
+        gas_text += f"（约 ${gas_value * eth_usd:.6f}）"
+    title = f"{bot_name} · {side_text}成功"
+    lines = [
+        f"{amount:g} {base_token} × ${price:.6f}",
+        f"实际{'支出' if side == 'BUY' else '收到'}：{total:.6f} {quote_token}",
+    ]
+    if side == "SELL" and profit is not None and profit_percent is not None:
+        lines.append(f"本次利润：{profit:+.6f} {quote_token}（{profit_percent:+.2f}%）")
+    lines.extend(["", f"钱包：{wallet_text}", f"{side_text}后持仓：{position:g} {base_token}", f"Gas：{gas_text}"])
+    body = "\n".join(lines)
     return title, body
 
 
@@ -107,6 +183,13 @@ def send_notification(title: str, body: str) -> None:
         "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\"\n"
         "end run"
     )
+    subprocess.run(
+        ["/usr/bin/osascript", "-e", script, title, body],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def is_allowed_test_origin(origin: str | None) -> bool:
@@ -124,7 +207,7 @@ class TestNotificationHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         origin = self.headers.get("Origin")
-        if self.path != "/test" or not is_allowed_test_origin(origin):
+        if self.path not in {"/test", "/notification-context"} or not is_allowed_test_origin(origin):
             self.send_error(403)
             return
         self.send_response(204)
@@ -135,6 +218,34 @@ class TestNotificationHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         origin = self.headers.get("Origin")
+        if self.path == "/notification-context":
+            if not is_allowed_test_origin(origin) or NOTIFICATION_CONTEXT_PATH is None:
+                self.send_error(403)
+                return
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 16384)
+                payload = json.loads(self.rfile.read(length))
+                aliases = payload.get("wallet_aliases", {})
+                if not isinstance(aliases, dict):
+                    raise ValueError("wallet_aliases must be an object")
+                eth_usd_price = _number(payload.get("eth_usd_price"))
+                clean_aliases = {
+                    str(address).lower(): str(alias).strip()[:80]
+                    for address, alias in aliases.items()
+                    if str(address).lower().startswith("0x") and str(alias).strip()
+                }
+                NOTIFICATION_CONTEXT_PATH.write_text(json.dumps({
+                    "wallet_aliases": clean_aliases,
+                    "eth_usd_price": eth_usd_price if eth_usd_price > 0 else None,
+                }, ensure_ascii=False), encoding="utf-8")
+                os.chmod(NOTIFICATION_CONTEXT_PATH, 0o600)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                self.send_error(400)
+                return
+            self.send_response(204)
+            self._send_cors_headers(origin)
+            self.end_headers()
+            return
         if self.path != "/test":
             self.send_error(404)
             return
@@ -163,13 +274,6 @@ def start_test_server(port: int) -> ThreadingHTTPServer:
     threading.Thread(target=server.serve_forever, name="notification-test-server", daemon=True).start()
     LOGGER.info("系统通知测试入口已监听 127.0.0.1:%d", port)
     return server
-    subprocess.run(
-        ["/usr/bin/osascript", "-e", script, title, body],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
 
 
 def load_seen(path: Path) -> tuple[bool, set[str]]:
@@ -212,7 +316,7 @@ def poll_once(
         key = trade_key(trade)
         if not key or key in seen:
             continue
-        send_notification(*format_notification(trade))
+        send_notification(*format_notification(trade, trades, load_notification_context()))
         seen.add(key)
         notified += 1
     save_seen(state_path, seen | current_keys)
@@ -231,16 +335,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-container", default="hummingbot-api")
     parser.add_argument("--test-port", type=int, default=24873)
     parser.add_argument("--native-notifier")
+    parser.add_argument("--notification-context-file", type=Path)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--test-notification", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
-    global NATIVE_NOTIFIER
+    global NATIVE_NOTIFIER, NOTIFICATION_CONTEXT_PATH
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     NATIVE_NOTIFIER = args.native_notifier
+    NOTIFICATION_CONTEXT_PATH = args.notification_context_file
     if args.test_notification:
         send_notification("Microduck 通知已启用", "页面关闭后，已确认的买入和卖出会显示在这里。")
         return 0
