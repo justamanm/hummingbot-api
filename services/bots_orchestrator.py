@@ -517,6 +517,27 @@ class BotsOrchestrator:
                 await gateway.close()
             return await repo.list(bot_name, controller_id, limit)
 
+    async def get_recent_confirmed_strategy_trades(self, limit: int) -> list[dict[str, Any]]:
+        """一次返回最近确认的买卖，供本机通知等只读消费者使用。"""
+        async with self.db_manager.get_session_context() as session:
+            repo = StrategyTradeRepository(session)
+            for bot_name in list(self.active_bots):
+                reports = self.mqtt_manager.get_bot_controller_reports(bot_name)
+                for controller_id, report in reports.items():
+                    info = report.get("custom_info", {}) if isinstance(report, dict) else {}
+                    await self._sync_confirmed_strategy_trades(
+                        repo, bot_name, controller_id, info if isinstance(info, dict) else {},
+                    )
+            records = await repo.list_recent_confirmed_trades(limit)
+            display_names = await BotRunRepository(session).get_display_names(
+                list({str(record.get("bot_name") or "") for record in records})
+            )
+            for record in records:
+                display_name = display_names.get(str(record.get("bot_name") or ""))
+                if display_name:
+                    record["bot_display_name"] = display_name
+            return records
+
     async def get_wallet_strategy_ledger(
         self,
         wallet_address: str,

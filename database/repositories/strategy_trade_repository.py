@@ -118,6 +118,18 @@ class StrategyTradeRepository:
         )).scalars())
         return [self._serialize(row) for row in rows]
 
+    async def list_recent_confirmed_trades(self, limit: int) -> list[dict[str, Any]]:
+        """读取所有钱包总账中最近确认的买卖，不包含授权记录。"""
+        query = select(StrategyTradeRecord).where(
+            StrategyTradeRecord.record_type == "TRADE",
+            StrategyTradeRecord.status == "CONFIRMED",
+            StrategyTradeRecord.side.in_(("BUY", "SELL")),
+        )
+        rows = list((await self.session.execute(
+            query.order_by(StrategyTradeRecord.timestamp.desc()).limit(limit)
+        )).scalars())
+        return [self._serialize(row) for row in rows]
+
     async def pending_approvals_for_wallet(self, wallet_address: str) -> list[StrategyTradeRecord]:
         query = select(StrategyTradeRecord).where(
             func.lower(StrategyTradeRecord.wallet_address) == wallet_address.lower(),

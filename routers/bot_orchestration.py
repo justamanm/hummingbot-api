@@ -248,6 +248,20 @@ async def get_strategy_trades(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/strategy-trades/recent-confirmed")
+async def get_recent_confirmed_strategy_trades(
+    limit: int = Query(default=500, ge=1, le=1000),
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+):
+    """返回所有钱包总账中最近确认的买卖；不创建第二份账单。"""
+    try:
+        trades = await bots_manager.get_recent_confirmed_strategy_trades(limit)
+        return {"status": "success", "trades": trades}
+    except Exception as e:
+        logger.error(f"Failed to get recent confirmed strategy trades: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/wallet-ledger")
 async def get_wallet_ledger(
     wallet_address: str = Query(..., min_length=1),
