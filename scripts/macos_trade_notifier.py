@@ -23,6 +23,7 @@ LOGGER = logging.getLogger("microduck_trade_notifier")
 TEST_NOTIFICATION_TITLE = "Microduck 系统通知测试"
 TEST_NOTIFICATION_BODY = "Mac 后台通知工作正常，关闭网页后也能接收成交通知。"
 LOCAL_ORIGIN = re.compile(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$")
+NATIVE_NOTIFIER: str | None = None
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -87,6 +88,20 @@ def format_notification(trade: dict[str, Any]) -> tuple[str, str]:
 
 
 def send_notification(title: str, body: str) -> None:
+    if NATIVE_NOTIFIER:
+        try:
+            subprocess.run(
+                ["/usr/bin/open", "-W", "-n", "-a", NATIVE_NOTIFIER, "--args", title, body],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=18,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or "").strip() or str(exc)
+            raise RuntimeError(detail) from exc
+        return
     script = (
         "on run argv\n"
         "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\"\n"
@@ -128,9 +143,12 @@ class TestNotificationHandler(BaseHTTPRequestHandler):
             return
         try:
             send_notification(TEST_NOTIFICATION_TITLE, TEST_NOTIFICATION_BODY)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             LOGGER.error("测试系统通知失败：%s", exc)
-            self.send_error(500, "macOS notification failed")
+            try:
+                self.send_error(500, "macOS notification failed")
+            except BrokenPipeError:
+                pass
             return
         self.send_response(204)
         self._send_cors_headers(origin)
@@ -212,14 +230,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docker-bin")
     parser.add_argument("--api-container", default="hummingbot-api")
     parser.add_argument("--test-port", type=int, default=24873)
+    parser.add_argument("--native-notifier")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--test-notification", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
+    global NATIVE_NOTIFIER
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    NATIVE_NOTIFIER = args.native_notifier
     if args.test_notification:
         send_notification("Microduck 通知已启用", "页面关闭后，已确认的买入和卖出会显示在这里。")
         return 0
@@ -246,7 +267,7 @@ def main() -> int:
     while True:
         try:
             poll_once(args.api_url, username, password, args.state_file)
-        except (OSError, ValueError, urllib.error.URLError) as exc:
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, urllib.error.URLError) as exc:
             LOGGER.warning("读取交易记录失败，稍后重试：%s", exc)
         if args.once:
             return 0

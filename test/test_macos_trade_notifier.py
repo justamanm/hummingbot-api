@@ -63,3 +63,16 @@ def test_system_notification_test_only_accepts_local_page_origins():
     assert notifier.is_allowed_test_origin("https://127.0.0.1:8443")
     assert notifier.is_allowed_test_origin(None)
     assert not notifier.is_allowed_test_origin("https://example.com")
+
+
+def test_native_notifier_is_used_when_configured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notifier, "NATIVE_NOTIFIER", "/tmp/Microduck Notifications.app")
+    monkeypatch.setattr(notifier.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    notifier.send_notification("标题", "内容")
+
+    assert calls[0][0][0] == [
+        "/usr/bin/open", "-W", "-n", "-a", "/tmp/Microduck Notifications.app", "--args", "标题", "内容",
+    ]
+    assert calls[0][1]["check"] is True

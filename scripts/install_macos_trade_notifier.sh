@@ -10,8 +10,39 @@ DATA_DIR="$HOME/Library/Application Support/Microduck"
 LOG_DIR="$HOME/Library/Logs/Microduck"
 PLIST_PATH="$AGENT_DIR/com.microduck.trade-notifier.plist"
 STATE_PATH="$DATA_DIR/trade-notifier-state.json"
+NOTIFIER_APP="$DATA_DIR/Microduck Notifications.app"
+NOTIFIER_BIN="$NOTIFIER_APP/Contents/MacOS/MicroduckNotifier"
 
 mkdir -p "$AGENT_DIR" "$DATA_DIR" "$LOG_DIR"
+mkdir -p "$NOTIFIER_APP/Contents/MacOS"
+
+cat > "$NOTIFIER_APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.microduck.trade-notifications</string>
+  <key>CFBundleName</key>
+  <string>Microduck 通知</string>
+  <key>CFBundleDisplayName</key>
+  <string>Microduck 通知</string>
+  <key>CFBundleExecutable</key>
+  <string>MicroduckNotifier</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
+EOF
+
+CLANG_MODULE_CACHE_PATH="$DATA_DIR/clang-module-cache" \
+  /usr/bin/clang -fobjc-arc -fblocks "$SCRIPT_DIR/MicroduckNotifier.m" \
+  -framework Foundation -framework UserNotifications -o "$NOTIFIER_BIN"
+/usr/bin/codesign --force --deep --sign - "$NOTIFIER_APP" >/dev/null
 
 cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -32,6 +63,8 @@ cat > "$PLIST_PATH" <<EOF
     <string>5</string>
     <string>--docker-bin</string>
     <string>$DOCKER_BIN</string>
+    <string>--native-notifier</string>
+    <string>$NOTIFIER_APP</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
