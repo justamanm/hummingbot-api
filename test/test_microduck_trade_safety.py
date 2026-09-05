@@ -99,9 +99,14 @@ def test_legacy_config_defaults_to_budget_mode():
 
 
 def test_default_normal_check_interval_is_four_seconds():
-    assert MicroduckProfitTrailingConfig(id="interval").normal_check_interval == 4
-    assert MicroduckProfitTrailingConfig(id="interval").buy_trailing_check_interval == 1
-    assert MicroduckProfitTrailingConfig(id="interval").sell_trailing_check_interval == 2
+    config = MicroduckProfitTrailingConfig(id="interval")
+    assert config.buy_price_upward_tolerance_usd == Decimal("0.001")
+    assert config.buy_trailing_rebound_percent == Decimal("2")
+    assert config.buy_trailing_rebound_adjustment_factor == Decimal("0.2")
+    assert config.sell_price_downward_tolerance_usd == Decimal("0.001")
+    assert config.normal_check_interval == 4
+    assert config.buy_trailing_check_interval == 1
+    assert config.sell_trailing_check_interval == 2
 
 
 def test_auto_start_next_cycle_is_disabled_by_default():
