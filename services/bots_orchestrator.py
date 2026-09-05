@@ -638,6 +638,11 @@ class BotsOrchestrator:
             "latest_approval_gas_estimate": latest_approval_gas_estimate,
         }
 
+    async def get_latest_wallet_approval_amount(self, wallet_address: str) -> Decimal | None:
+        """读取本系统记录的最近一次钱包授权总额。"""
+        async with self.db_manager.get_session_context() as session:
+            return await StrategyTradeRepository(session).latest_confirmed_approval_amount(wallet_address)
+
     async def save_wallet_approval_gas_estimate(
         self,
         wallet_address: str,

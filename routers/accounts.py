@@ -184,6 +184,7 @@ async def list_gateway_wallet_balances(
     network: str = Query(..., min_length=1),
     tokens: str = Query(..., min_length=1),
     accounts_service: AccountsService = Depends(get_accounts_service),
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
 ):
     """Return requested token balances for every Gateway wallet on a chain."""
     try:
@@ -208,6 +209,11 @@ async def list_gateway_wallet_balances(
                     addresses.append(str(address))
 
         async def fetch(address: str) -> dict:
+            configured_approvals: dict[str, str] = {}
+            if "USDG" in requested_tokens:
+                configured_amount = await bots_manager.get_latest_wallet_approval_amount(address)
+                if configured_amount is not None:
+                    configured_approvals["USDG"] = format(configured_amount, "f")
             try:
                 result = await accounts_service.gateway_client.get_balances(
                     chain, network, address, tokens=requested_tokens
@@ -218,9 +224,9 @@ async def list_gateway_wallet_balances(
                     token: str(normalized.get(token.lower(), 0))
                     for token in requested_tokens
                 }
-                return {"address": address, "balances": values, "error": None}
+                return {"address": address, "balances": values, "configuredApprovals": configured_approvals, "error": None}
             except Exception as exc:
-                return {"address": address, "balances": None, "error": str(exc)}
+                return {"address": address, "balances": None, "configuredApprovals": configured_approvals, "error": str(exc)}
 
         results_task = asyncio.gather(*(fetch(address) for address in addresses))
         prices_task = accounts_service.gateway_wallet_service.get_gateway_prices(
@@ -248,8 +254,9 @@ async def get_gateway_wallet_allowances(
     spender: str = Query(..., min_length=1),
     tokens: str = Query(..., min_length=1),
     accounts_service: AccountsService = Depends(get_accounts_service),
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
 ):
-    """Return one Gateway wallet's read-only token allowances."""
+    """Return remaining on-chain allowances and the latest configured totals."""
     requested_tokens = list(dict.fromkeys(
         item.strip() for item in tokens.split(",") if item.strip()
     ))
@@ -272,7 +279,12 @@ async def get_gateway_wallet_allowances(
             approvals = dict(result.get("approvals") or {})
             for token in requested_tokens:
                 approvals.setdefault(token, "0")
-            result = {**result, "approvals": approvals}
+            configured_approvals: dict[str, str] = {}
+            if "USDG" in requested_tokens:
+                configured_amount = await bots_manager.get_latest_wallet_approval_amount(address)
+                if configured_amount is not None:
+                    configured_approvals["USDG"] = format(configured_amount, "f")
+            result = {**result, "approvals": approvals, "configuredApprovals": configured_approvals}
         return result
     except HTTPException:
         raise

@@ -138,6 +138,16 @@ class StrategyTradeRepository:
         )
         return list((await self.session.execute(query)).scalars())
 
+    async def latest_confirmed_approval_amount(self, wallet_address: str) -> Decimal | None:
+        """返回该钱包最近一次已确认的授权总额。"""
+        query = select(StrategyTradeRecord.approval_amount).where(
+            func.lower(StrategyTradeRecord.wallet_address) == wallet_address.lower(),
+            StrategyTradeRecord.record_type == "APPROVAL",
+            StrategyTradeRecord.status == "CONFIRMED",
+            StrategyTradeRecord.approval_amount.is_not(None),
+        ).order_by(StrategyTradeRecord.timestamp.desc()).limit(1)
+        return (await self.session.execute(query)).scalar_one_or_none()
+
     async def list_by_wallet(
         self,
         wallet_address: str,
