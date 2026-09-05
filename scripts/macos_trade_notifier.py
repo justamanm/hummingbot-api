@@ -234,10 +234,15 @@ class TestNotificationHandler(BaseHTTPRequestHandler):
                     for address, alias in aliases.items()
                     if str(address).lower().startswith("0x") and str(alias).strip()
                 }
-                NOTIFICATION_CONTEXT_PATH.write_text(json.dumps({
-                    "wallet_aliases": clean_aliases,
-                    "eth_usd_price": eth_usd_price if eth_usd_price > 0 else None,
-                }, ensure_ascii=False), encoding="utf-8")
+                previous = load_notification_context()
+                next_context = dict(previous)
+                if "wallet_aliases" in payload:
+                    next_context["wallet_aliases"] = clean_aliases
+                if "eth_usd_price" in payload:
+                    next_context["eth_usd_price"] = eth_usd_price if eth_usd_price > 0 else None
+                if "system_notifications_enabled" in payload:
+                    next_context["system_notifications_enabled"] = payload["system_notifications_enabled"] is not False
+                NOTIFICATION_CONTEXT_PATH.write_text(json.dumps(next_context, ensure_ascii=False), encoding="utf-8")
                 os.chmod(NOTIFICATION_CONTEXT_PATH, 0o600)
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 self.send_error(400)
@@ -316,9 +321,11 @@ def poll_once(
         key = trade_key(trade)
         if not key or key in seen:
             continue
-        send_notification(*format_notification(trade, trades, load_notification_context()))
+        context = load_notification_context()
+        if context.get("system_notifications_enabled", True):
+            send_notification(*format_notification(trade, trades, context))
+            notified += 1
         seen.add(key)
-        notified += 1
     save_seen(state_path, seen | current_keys)
     if notified:
         LOGGER.info("已发送 %d 条交易通知", notified)

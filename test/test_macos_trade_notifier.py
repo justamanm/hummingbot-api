@@ -73,6 +73,19 @@ def test_detailed_sell_notification_puts_profit_before_secondary_details():
     ]
 
 
+def test_disabled_system_notifications_are_recorded_without_sending(tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    notifier.save_seen(state, {notifier.trade_key(_trade())})
+    monkeypatch.setattr(notifier, "fetch_confirmed_trades", lambda *_: [_trade("0x2"), _trade()])
+    monkeypatch.setattr(notifier, "load_notification_context", lambda: {"system_notifications_enabled": False})
+    sent = []
+    monkeypatch.setattr(notifier, "send_notification", lambda *message: sent.append(message))
+
+    assert notifier.poll_once("http://api", "u", "p", state) == 0
+    assert sent == []
+    assert notifier.trade_key(_trade("0x2")) in notifier.load_seen(state)[1]
+
+
 def test_container_environment_is_parsed_without_writing_password(monkeypatch):
     result = type("Result", (), {"stdout": '["USERNAME=microduck", "PASSWORD=secret"]'})()
     monkeypatch.setattr(notifier.subprocess, "run", lambda *args, **kwargs: result)
