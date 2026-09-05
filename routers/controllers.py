@@ -627,7 +627,7 @@ async def update_bot_controller_config(bot_name: str, controller_name: str, conf
             "buy_trailing_rebound_max_percent", "sell_profit_multiple",
             "sell_price_max_usd", "sell_price_downward_tolerance_usd",
             "sell_trailing_drop_mode", "sell_trailing_drop_usd", "sell_trailing_drop_percent",
-            "normal_check_interval", "trailing_check_interval", "live_trading",
+            "normal_check_interval", "buy_trailing_check_interval", "sell_trailing_check_interval", "live_trading",
         }
         should_restart_completed = bool(changed_fields & restart_fields) or (
             "auto_start_next_cycle" in changed_fields

@@ -121,7 +121,8 @@ class MicroduckTrailingRule:
         sell_price_downward_tolerance_usd: Decimal,
         sell_price_max_usd: Optional[Decimal],
         normal_check_interval: int,
-        trailing_check_interval: int,
+        buy_trailing_check_interval: int,
+        sell_trailing_check_interval: int,
         state: RuleState = RuleState.WAITING_TO_BUY,
         trough_unit_buy_price_usd: Decimal = Decimal("0"),
         peak_unit_sell_price_usd: Decimal = Decimal("0"),
@@ -141,7 +142,8 @@ class MicroduckTrailingRule:
         self.sell_price_downward_tolerance_usd = sell_price_downward_tolerance_usd
         self.sell_price_max_usd = sell_price_max_usd
         self.normal_check_interval = normal_check_interval
-        self.trailing_check_interval = trailing_check_interval
+        self.buy_trailing_check_interval = buy_trailing_check_interval
+        self.sell_trailing_check_interval = sell_trailing_check_interval
         self.state = state
         self.trough_unit_buy_price_usd = trough_unit_buy_price_usd
         self.peak_unit_sell_price_usd = peak_unit_sell_price_usd
@@ -216,8 +218,10 @@ class MicroduckTrailingRule:
 
     @property
     def check_interval(self) -> int:
-        if self.state in {RuleState.TRAILING_BUY, RuleState.TRAILING}:
-            return self.trailing_check_interval
+        if self.state == RuleState.TRAILING_BUY:
+            return self.buy_trailing_check_interval
+        if self.state == RuleState.TRAILING:
+            return self.sell_trailing_check_interval
         return self.normal_check_interval
 
     def evaluate_buy(
@@ -342,7 +346,8 @@ class MicroduckProfitTrailingConfig(ControllerConfigBase):
     # 留空表示不设上限。保留对旧配置中 0 的兼容，见下方的预处理。
     sell_price_max_usd: Optional[Decimal] = Field(default=None, ge=Decimal("0"), json_schema_extra={"is_updatable": True})
     normal_check_interval: int = Field(default=4, ge=3, json_schema_extra={"is_updatable": True})
-    trailing_check_interval: int = Field(default=1, ge=1, json_schema_extra={"is_updatable": True})
+    buy_trailing_check_interval: int = Field(default=2, ge=1, json_schema_extra={"is_updatable": True})
+    sell_trailing_check_interval: int = Field(default=2, ge=1, json_schema_extra={"is_updatable": True})
     status_log_interval_seconds: int = Field(
         default=60,
         ge=15,
@@ -362,6 +367,10 @@ class MicroduckProfitTrailingConfig(ControllerConfigBase):
             if group is not None:
                 group = str(group).strip()
                 values["price_query_group"] = group or None
+            legacy_trailing_interval = values.pop("trailing_check_interval", None)
+            if legacy_trailing_interval is not None:
+                values.setdefault("buy_trailing_check_interval", legacy_trailing_interval)
+                values.setdefault("sell_trailing_check_interval", legacy_trailing_interval)
             # 旧版本用 0 表示“不限制”；新版本用空值，避免用户误以为 0 是有效价格上限。
             sell_price_max = values.get("sell_price_max_usd")
             if sell_price_max is not None:
@@ -397,8 +406,10 @@ class MicroduckProfitTrailingConfig(ControllerConfigBase):
             raise ValueError("最大买入反弹比例不能小于基础买入反弹比例")
         if self.sell_trailing_drop_usd <= 0:
             raise ValueError("币价回落金额必须大于0")
-        if self.trailing_check_interval >= self.normal_check_interval:
-            raise ValueError("跟踪阶段的检查间隔必须短于普通阶段")
+        if self.buy_trailing_check_interval >= self.normal_check_interval:
+            raise ValueError("买入跟踪检查间隔必须短于普通检查间隔")
+        if self.sell_trailing_check_interval >= self.normal_check_interval:
+            raise ValueError("卖出跟踪检查间隔必须短于普通检查间隔")
         return self
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
@@ -442,7 +453,8 @@ class MicroduckProfitTrailing(ControllerBase):
             sell_price_downward_tolerance_usd=config.sell_price_downward_tolerance_usd,
             sell_price_max_usd=config.sell_price_max_usd,
             normal_check_interval=config.normal_check_interval,
-            trailing_check_interval=config.trailing_check_interval,
+            buy_trailing_check_interval=config.buy_trailing_check_interval,
+            sell_trailing_check_interval=config.sell_trailing_check_interval,
         )
         self.last_check_timestamp = 0.0
         self.pending_executor_id: Optional[str] = None
@@ -501,7 +513,8 @@ class MicroduckProfitTrailing(ControllerBase):
                     "sell_profit_multiple", "sell_trailing_drop_mode",
                     "sell_trailing_drop_usd", "sell_trailing_drop_percent",
                     "sell_price_downward_tolerance_usd", "sell_price_max_usd",
-                    "normal_check_interval", "trailing_check_interval", "price_query_group", "live_trading",
+                    "normal_check_interval", "buy_trailing_check_interval", "sell_trailing_check_interval",
+                    "price_query_group", "live_trading",
                 )
             })
 
@@ -512,7 +525,8 @@ class MicroduckProfitTrailing(ControllerBase):
             "buy_trailing_rebound_max_percent", "sell_profit_multiple",
             "sell_trailing_drop_mode", "sell_trailing_drop_usd",
             "sell_trailing_drop_percent", "sell_price_downward_tolerance_usd",
-            "sell_price_max_usd", "normal_check_interval", "trailing_check_interval",
+            "sell_price_max_usd", "normal_check_interval",
+            "buy_trailing_check_interval", "sell_trailing_check_interval",
         )
         changed = []
         for name in rule_fields:
@@ -1710,7 +1724,8 @@ class MicroduckProfitTrailing(ControllerBase):
             "auto_start_next_cycle": self.config.auto_start_next_cycle,
             "check_interval_seconds": self.rule.check_interval,
             "normal_check_interval": self.rule.normal_check_interval,
-            "trailing_check_interval": self.rule.trailing_check_interval,
+            "buy_trailing_check_interval": self.rule.buy_trailing_check_interval,
+            "sell_trailing_check_interval": self.rule.sell_trailing_check_interval,
             "status_log_interval_seconds": self.config.status_log_interval_seconds,
             "buy_price_min_usd": str(self.rule.buy_price_min_usd),
             "buy_price_upward_tolerance_usd": str(self.rule.buy_price_upward_tolerance_usd),

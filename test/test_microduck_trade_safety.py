@@ -72,7 +72,8 @@ def trailing_rule(**overrides) -> MicroduckTrailingRule:
         "sell_price_downward_tolerance_usd": Decimal("0"),
         "sell_price_max_usd": Decimal("0.02"),
         "normal_check_interval": 3,
-        "trailing_check_interval": 1,
+        "buy_trailing_check_interval": 1,
+        "sell_trailing_check_interval": 1,
     }
     values.update(overrides)
     return MicroduckTrailingRule(**values)
@@ -99,6 +100,8 @@ def test_legacy_config_defaults_to_budget_mode():
 
 def test_default_normal_check_interval_is_four_seconds():
     assert MicroduckProfitTrailingConfig(id="interval").normal_check_interval == 4
+    assert MicroduckProfitTrailingConfig(id="interval").buy_trailing_check_interval == 2
+    assert MicroduckProfitTrailingConfig(id="interval").sell_trailing_check_interval == 2
 
 
 def test_auto_start_next_cycle_is_disabled_by_default():
