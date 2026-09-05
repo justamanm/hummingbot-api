@@ -46,9 +46,9 @@ def _expected_usdg_reservation(config: dict[str, Any]) -> Decimal | None:
 
 
 def _controller_needs_buy_reservation(report: dict[str, Any] | None) -> bool:
-    """Only states that can make a future buy reserve shared wallet allowance."""
+    """Keep the configured allowance reserved until the controller has ended."""
     state = str((report or {}).get("custom_info", {}).get("state") or "").lower()
-    return state not in {"holding", "trailing", "selling", "completed", "external_exit"}
+    return state not in {"completed", "external_exit"}
 
 
 async def _validate_usdg_allowance_before_deploy(
