@@ -8,15 +8,21 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 
 LOGGER = logging.getLogger("microduck_trade_notifier")
+TEST_NOTIFICATION_TITLE = "Microduck 系统通知测试"
+TEST_NOTIFICATION_BODY = "Mac 后台通知工作正常，关闭网页后也能接收成交通知。"
+LOCAL_ORIGIN = re.compile(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$")
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -86,6 +92,59 @@ def send_notification(title: str, body: str) -> None:
         "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\"\n"
         "end run"
     )
+
+
+def is_allowed_test_origin(origin: str | None) -> bool:
+    """浏览器只能从本机页面触发固定内容的测试通知。"""
+    return origin is None or LOCAL_ORIGIN.fullmatch(origin) is not None
+
+
+class TestNotificationHandler(BaseHTTPRequestHandler):
+    """本机测试入口；不接收自定义通知内容。"""
+
+    def _send_cors_headers(self, origin: str | None) -> None:
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        origin = self.headers.get("Origin")
+        if self.path != "/test" or not is_allowed_test_origin(origin):
+            self.send_error(403)
+            return
+        self.send_response(204)
+        self._send_cors_headers(origin)
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self) -> None:  # noqa: N802
+        origin = self.headers.get("Origin")
+        if self.path != "/test":
+            self.send_error(404)
+            return
+        if not is_allowed_test_origin(origin):
+            self.send_error(403)
+            return
+        try:
+            send_notification(TEST_NOTIFICATION_TITLE, TEST_NOTIFICATION_BODY)
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOGGER.error("测试系统通知失败：%s", exc)
+            self.send_error(500, "macOS notification failed")
+            return
+        self.send_response(204)
+        self._send_cors_headers(origin)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:
+        LOGGER.debug(format, *args)
+
+
+def start_test_server(port: int) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", port), TestNotificationHandler)
+    threading.Thread(target=server.serve_forever, name="notification-test-server", daemon=True).start()
+    LOGGER.info("系统通知测试入口已监听 127.0.0.1:%d", port)
+    return server
     subprocess.run(
         ["/usr/bin/osascript", "-e", script, title, body],
         check=True,
@@ -152,6 +211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=5)
     parser.add_argument("--docker-bin")
     parser.add_argument("--api-container", default="hummingbot-api")
+    parser.add_argument("--test-port", type=int, default=24873)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--test-notification", action="store_true")
     return parser.parse_args()
@@ -175,6 +235,12 @@ def main() -> int:
     password = env.get("PASSWORD") or env.get("GATEWAY_PASSPHRASE") or ""
     if not password:
         LOGGER.error("环境文件中缺少 PASSWORD 或 GATEWAY_PASSPHRASE")
+        return 2
+
+    try:
+        start_test_server(args.test_port)
+    except OSError as exc:
+        LOGGER.error("无法启动系统通知测试入口：%s", exc)
         return 2
 
     while True:

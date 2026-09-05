@@ -56,3 +56,10 @@ def test_container_environment_is_parsed_without_writing_password(monkeypatch):
         "USERNAME": "microduck",
         "PASSWORD": "secret",
     }
+
+
+def test_system_notification_test_only_accepts_local_page_origins():
+    assert notifier.is_allowed_test_origin("http://localhost:3000")
+    assert notifier.is_allowed_test_origin("https://127.0.0.1:8443")
+    assert notifier.is_allowed_test_origin(None)
+    assert not notifier.is_allowed_test_origin("https://example.com")
